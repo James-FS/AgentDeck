@@ -1,0 +1,4 @@
+{
+  "skillOverrides": { "claude-review": "off" },
+  "enabledPlugins": { "fixture-plugin@fixture": false }
+}

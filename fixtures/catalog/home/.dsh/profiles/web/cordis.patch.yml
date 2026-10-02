@@ -1,0 +1,16 @@
+- id: mcp-docs
+  name: '@deepseek-ai/dsh-mcp-client'
+  disabled: false
+  config:
+    serverName: dsh-docs
+    transport: streamable-http
+    url: https://example.invalid/dsh
+    headers:
+      Authorization: Bearer AGENTDECK_SECRET_SENTINEL
+- id: mcp-dynamic
+  name: '@deepseek-ai/dsh-mcp-client'
+  disabled: !!js '!process.env.AGENTDECK_FIXTURE_ENABLE'
+  config:
+    serverName: dynamic
+    transport: stdio
+    command: never-execute-this-fixture

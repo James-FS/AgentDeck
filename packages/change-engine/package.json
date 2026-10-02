@@ -1,0 +1,12 @@
+{
+  "name": "@agentdeck/change-engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@agentdeck/contracts": "workspace:*",
+    "@iarna/toml": "^3.0.0"
+  },
+  "scripts": { "build": "tsc -b" }
+}

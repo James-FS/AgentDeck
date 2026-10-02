@@ -1,0 +1,4 @@
+{
+  "skillOverrides": { "project-claude": "off" },
+  "unknownFixtureField": { "retain": true }
+}

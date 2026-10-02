@@ -1,0 +1,20 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist-types",
+    "declarationDir": "dist-types",
+    "emitDeclarationOnly": true,
+    "tsBuildInfoFile": "dist-types/tsconfig.tsbuildinfo",
+    "composite": true,
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../../packages/contracts" },
+    { "path": "../../packages/core" },
+    { "path": "../../packages/storage" },
+    { "path": "../../packages/adapters" },
+    { "path": "../../packages/change-engine" }
+  ]
+}

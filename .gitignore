@@ -1,0 +1,11 @@
+node_modules/
+**/node_modules/
+**/dist/
+**/dist-types/
+**/*.tsbuildinfo
+**/.tsbuildinfo
+work/
+coverage/
+.env
+.env.*
+!.env.example

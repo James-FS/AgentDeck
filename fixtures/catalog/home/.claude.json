@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "fixture-cloud": {
+      "type": "http",
+      "url": "https://example.invalid/claude",
+      "headers": { "Authorization": "Bearer AGENTDECK_SECRET_SENTINEL" }
+    }
+  }
+}

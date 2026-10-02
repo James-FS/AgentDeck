@@ -1,0 +1,13 @@
+# AgentDeck isolated fixture; these are dummy credentials.
+[mcp_servers.docs]
+url = "https://example.invalid/mcp"
+enabled = true # retain this comment
+bearer_token_env_var = "FIXTURE_DOCS_TOKEN"
+
+[mcp_servers."server.with-dot"]
+command = "node"
+args = ["fixture-server.js"]
+enabled = false
+
+[plugins."fixture-plugin@local"]
+enabled = false

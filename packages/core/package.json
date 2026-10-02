@@ -1,0 +1,9 @@
+{
+  "name": "@agentdeck/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": { "@agentdeck/contracts": "workspace:*" },
+  "scripts": { "build": "tsc -b" }
+}

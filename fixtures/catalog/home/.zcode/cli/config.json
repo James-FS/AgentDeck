@@ -1,0 +1,13 @@
+{
+  "mcp": {
+    "servers": {
+      "zcode-docs": {
+        "type": "http",
+        "url": "https://example.invalid/zcode",
+        "enabled": false,
+        "headers": { "Authorization": "Bearer AGENTDECK_SECRET_SENTINEL" }
+      }
+    }
+  },
+  "plugins": { "enabled": true, "dirs": [] }
+}

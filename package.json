@@ -1,0 +1,28 @@
+{
+  "name": "agentdeck",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.22.0",
+  "engines": { "node": ">=22.12.0" },
+  "scripts": {
+    "dev": "concurrently -k -n server,web -c blue,green \"pnpm --filter @agentdeck/server dev\" \"pnpm --filter @agentdeck/web dev\"",
+    "typecheck": "tsc -b --pretty false && pnpm --filter @agentdeck/web typecheck",
+    "build": "pnpm -r --if-present build",
+    "start": "node apps/server/dist/index.js",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@types/node": "24.7.0",
+    "concurrently": "9.2.1",
+    "eslint": "9.36.0",
+    "@playwright/test": "1.56.1",
+    "typescript-eslint": "8.44.1",
+    "tsx": "4.20.6",
+    "tsup": "8.5.0",
+    "typescript": "5.9.2",
+    "vitest": "3.2.4"
+  }
+}

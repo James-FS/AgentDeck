@@ -1,0 +1,29 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/contracts" },
+    { "path": "packages/core" },
+    { "path": "packages/storage" },
+    { "path": "packages/adapters" },
+    { "path": "packages/change-engine" },
+    { "path": "apps/server" },
+    { "path": "apps/cli" },
+    { "path": "apps/web" }
+  ],
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "composite": true,
+    "sourceMap": true,
+    "outDir": "dist"
+  }
+}
