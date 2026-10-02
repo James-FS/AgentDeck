@@ -21,6 +21,7 @@ export function serializePreparedChange(prepared: PreparedChange): string {
       pathIdentity: prepared.private.pathIdentity,
       beforeEnabled: prepared.private.beforeEnabled,
       desiredEnabled: prepared.private.desiredEnabled,
+      ...(prepared.private.target ? { target: prepared.private.target } : {}),
     },
   };
   return JSON.stringify(value);
@@ -41,6 +42,7 @@ export function deserializePreparedChange(serialized: string): PreparedChange {
       pathIdentity: value.private.pathIdentity,
       beforeEnabled: value.private.beforeEnabled,
       desiredEnabled: value.private.desiredEnabled,
+      ...(value.private.target ? { target: value.private.target } : {}),
     },
   };
 }

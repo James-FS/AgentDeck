@@ -1,0 +1,96 @@
+import { expect, test } from '@playwright/test';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { copyCatalogFixture, createTestDirectory, fileTreeDigests, removeTestDirectory } from '../helpers';
+
+test.use({ actionTimeout: 10000 });
+
+test('registers a writable Codex root, checks its version and previews/applies/restores Skill and plugin controls', async ({ page }) => {
+  test.skip(process.platform !== 'win32', 'Uses an isolated Windows version shim.');
+  test.setTimeout(90000);
+  const root = await createTestDirectory('basic-controls-browser ');
+  const { home } = await copyCatalogFixture(root);
+  const configRoot = path.join(home, '.codex');
+  const configPath = path.join(configRoot, 'config.toml');
+  const skill = path.join(configRoot, 'skills/local-control/SKILL.md');
+  const plugin = path.join(configRoot, 'plugins/cache/local/browser-plugin/1.0.0');
+  const bin = path.join(root, 'shim bin');
+  for (const dir of [bin, path.dirname(skill), path.join(plugin, '.codex-plugin'), path.join(plugin, 'skills/plugin-child')]) await mkdir(dir, { recursive: true });
+  await writeFile(path.join(bin, 'codex.cmd'), '@echo off\r\necho codex-cli 0.159.2\r\n');
+  await writeFile(skill, '---\nname: local-control\ndescription: Isolated fixture\n---\nDo not execute.\n');
+  await writeFile(path.join(plugin, '.codex-plugin/plugin.json'), JSON.stringify({ name: 'browser-plugin', version: '1.0.0', skills: './skills' }));
+  await writeFile(path.join(plugin, 'skills/plugin-child/SKILL.md'), 'fixture');
+  await writeFile(configPath, `# Preserve fixture\n[plugins."browser-plugin@local"]\nenabled = true\n[marketplaces.local]\nsource_type = "local"\nsource = ${JSON.stringify(path.join(root, 'market'))}\n`);
+  const before = await fileTreeDigests(home);
+  const original = await readFile(configPath);
+  let server: ChildProcess | undefined;
+  try {
+    server = spawn(process.execPath, ['apps/server/dist/index.js'], { cwd: path.resolve('.'), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, PATH: bin, PATHEXT: '.CMD', PORT: '0', AGENTDECK_HOME: path.join(root, 'data'), AGENTDECK_USER_HOME: home, CODEX_HOME: configRoot, CLAUDE_CONFIG_DIR: path.join(home, '.claude'), ZCODE_HOME: path.join(home, '.zcode'), DSH_HOME: path.join(home, '.dsh') } });
+    const startupUrl = await new Promise<string>((resolve, reject) => {
+      let output = '';
+      const timer = setTimeout(() => reject(new Error('Isolated server did not start.')), 15000);
+      server!.once('error', error => { clearTimeout(timer); reject(error); });
+      server!.once('exit', () => { clearTimeout(timer); reject(new Error('Isolated server exited.')); });
+      server!.stdout!.on('data', chunk => { output += chunk; const match = output.match(/http:\/\/127\.0\.0\.1:\d+\/#ticket=[A-Za-z0-9_-]+/); if (match) { clearTimeout(timer); resolve(match[0]); } });
+    });
+    const errors: string[] = [];
+    page.on('pageerror', error => errors.push(error.message));
+    await page.goto(startupUrl);
+    await page.getByRole('button', { name: '扫描本机配置（只读）', exact: true }).click();
+    const search = page.getByPlaceholder('搜索名称或来源路径');
+    await search.fill('local-control');
+    let row = page.getByRole('row').filter({ has: page.getByRole('button', { name: 'local-control', exact: true }) });
+    await expect(row.getByRole('button', { name: '计划停用', exact: true })).toHaveCount(0);
+    await page.getByRole('button', { name: /^Agent 实例/ }).click();
+    await page.getByRole('button', { name: '登记实例', exact: true }).first().click();
+    const registration = page.getByRole('dialog');
+    await registration.getByPlaceholder(/^例如：/).fill(configRoot);
+    await registration.getByText('允许 Codex 配置修改（仅支持的单项资源）', { exact: true }).click();
+    await expect(registration.getByRole('checkbox')).toBeChecked();
+    await registration.getByRole('button', { name: '登记实例', exact: true }).click();
+    await expect(registration).toBeHidden();
+    const card = page.locator('.instance-card').filter({ has: page.getByRole('heading', { name: 'Codex', exact: true }) });
+    await card.getByRole('button', { name: /检查.*版本/ }).click();
+    await expect(card.getByText('0.159.2', { exact: false }).first()).toBeVisible();
+    for (const name of ['local-control', 'browser-plugin']) {
+      await page.getByRole('button', { name: '资源管理', exact: true }).click();
+      await search.fill(name);
+      row = page.getByRole('row').filter({ has: page.getByRole('button', { name, exact: true }) });
+      await expect(row.getByRole('button', { name: '计划停用', exact: true })).toBeVisible();
+      await row.locator('.resource-detail-link').click();
+      await expect(page.getByRole('dialog').getByText('Codex 单项配置计划可用', { exact: true })).toBeVisible();
+      await expect(page.getByRole('dialog').locator('.evidence-head b').filter({ hasText: /^原生配置复读 · 已验证/ })).toBeVisible();
+      await page.getByRole('dialog').getByRole('button', { name: /Close|关闭/i }).first().click();
+      await expect(page.getByRole('dialog')).toBeHidden();
+      await row.getByRole('button', { name: '计划停用', exact: true }).click();
+      await expect(page.getByText('Codex 资源配置计划', { exact: true })).toBeVisible();
+      await expect(page.getByRole('dialog').getByText(configPath, { exact: true })).toBeVisible();
+      if (name === 'browser-plugin') await expect(page.getByRole('dialog').getByText('plugin-child', { exact: true })).toBeVisible();
+      expect(await readFile(configPath)).toEqual(original);
+      await page.getByRole('button', { name: '确认应用计划', exact: true }).click();
+      await expect(page.getByText('操作结果：succeeded')).toBeVisible();
+      await page.getByRole('button', { name: '关闭', exact: true }).click();
+      await expect(page.getByRole('dialog')).toBeHidden();
+      await expect(row.getByText('已停用', { exact: true })).toBeVisible();
+      await expect(row.getByText('等待生效', { exact: true })).toBeVisible();
+      await mkdir('work/browser-proof', { recursive: true });
+      await page.screenshot({ path: `work/browser-proof/basic-${name}.png`, fullPage: true });
+      await page.getByRole('button', { name: /^操作记录/ }).click();
+      await page.getByRole('button', { name: '创建恢复计划', exact: true }).first().click();
+      await page.getByRole('button', { name: '确认应用计划', exact: true }).click();
+      await expect(page.getByText('操作结果：succeeded')).toBeVisible();
+      await page.getByRole('button', { name: '关闭', exact: true }).click();
+      await expect(page.getByRole('dialog')).toBeHidden();
+      expect(await readFile(configPath)).toEqual(original);
+      await page.getByRole('button', { name: '资源管理', exact: true }).click();
+      await expect(row.getByText('已启用', { exact: true })).toBeVisible();
+    }
+    expect(errors).toEqual([]);
+    expect(await fileTreeDigests(home)).toEqual(before);
+  } finally {
+    if (server && server.exitCode === null) await new Promise<void>(resolve => { const timer = setTimeout(() => { server!.kill('SIGKILL'); resolve(); }, 3000); server!.once('exit', () => { clearTimeout(timer); resolve(); }); server!.kill(); });
+    await removeTestDirectory(root);
+  }
+});

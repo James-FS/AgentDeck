@@ -2,7 +2,7 @@ import type { AgentAdapter, AgentInstance, Binding, ScanContext, ScanReport } fr
 import path from 'node:path';
 import {
   baseBinding, declaredPath, directDirectories, expandPath, existsDirectory, existsRegularFile, findExecutable,
-  instance, isSafePathWithin, object, report, safeMcpFile, scanSingleSkill, scanSkillRoot,
+  instance, isSafePathWithin, mcpTransport, object, report, safeMcpFile, scanSingleSkill, scanSkillRoot,
 } from './shared.js';
 
 function enabledFrom(value: unknown): boolean | null {
@@ -36,6 +36,7 @@ function addMcpEntries(args: {
       origin: 'configuration', configurationSourcePath: args.file,
       configurationKey: args.configurationKey ? `${args.configurationKey}.${name}` : `mcpServers.${name}`,
       configurationEnabled: enabled, cacheState: 'unknown',
+      mcpTransport: mcpTransport(server),
       diagnostics: server ? [] : [`${args.label} entry is not a static object.`],
       readOnlyReason: 'Claude Code MCP configuration is read-only in this iteration.',
     }));
@@ -246,6 +247,7 @@ async function scanClaudePlugins(args: {
                   configurationKey: configuration.key,
                   configurationEnabled: configuration.enabled,
                 } : { configurationEnabled: null }),
+                mcpTransport: mcpTransport(rawServer),
                 cacheState: 'present',
                 diagnostics: [
                   ...(configuration?.enabled === false ? ['Disabled by the parent plugin configuration.'] : []),
@@ -436,6 +438,7 @@ async function scanClaudeFilesystemPlugins(context: ScanContext, diagnostics: st
           sourcePath: mcpSource, projectId: null, nativeKey: `filesystem-plugin:${folder}.mcpServers.${serverName}`,
           parentId: parent.id, enabled: null, origin: 'filesystem', ...(version ? { pluginVersion: version } : {}),
           configurationEnabled: null, cacheState: 'unknown',
+          mcpTransport: mcpTransport(raw),
           diagnostics: [
             ...(explicitEnabled ? ['A bundled server flag does not establish the parent plugin configuration or runtime state.'] : []),
             'No exact name@marketplace configuration identity was available for this filesystem plugin.',

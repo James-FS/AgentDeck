@@ -5,7 +5,7 @@ import {
 import { constants as fsConstants } from 'node:fs';
 import path from 'node:path';
 import type { ChangePlan, Operation } from '@agentdeck/contracts';
-import { editIndependentMcpEnabled } from './toml-edit.js';
+import { editCodexEnabled } from './toml-edit.js';
 import {
   type AppliedChange,
   ChangeEngineError,
@@ -13,6 +13,7 @@ import {
   type PathIdentity,
   type PathIdentityEntry,
   type PreparedChange,
+  type CodexToggleTarget,
   type PrepareToggleInput,
   type RecoveryItem,
   type RecoveryReport,
@@ -28,6 +29,7 @@ interface AppliedRecord {
   plan: ChangePlan;
   configPath: string;
   serverName: string;
+  target?: CodexToggleTarget;
   beforeHash: string;
   afterHash: string;
   snapshotPath: string | null;
@@ -45,6 +47,7 @@ interface JournalRecord {
   operation: Operation;
   configPath: string;
   serverName: string;
+  target?: CodexToggleTarget;
   beforeHash: string;
   afterHash: string;
   snapshotPath: string | null;
@@ -69,6 +72,12 @@ function fail(code: ConstructorParameters<typeof ChangeEngineError>[0], message:
 function safeNow(input?: Date): Date { return input ? new Date(input.getTime()) : new Date(); }
 
 function stateLabel(value: boolean | null): string { return value === null ? 'unknown' : value ? 'true' : 'false'; }
+
+function targetLabel(serverName: string, target?: CodexToggleTarget): string {
+  if (target?.kind === 'plugin') return `[plugins.${JSON.stringify(target.id)}]`;
+  if (target?.kind === 'skill') return `[[skills.config]]\npath = ${JSON.stringify(target.path)}`;
+  return `[mcp_servers.${JSON.stringify(serverName)}]`;
+}
 
 function decodeUtf8(bytes: Buffer): string {
   const hasBom = bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
@@ -348,7 +357,7 @@ export async function prepareToggle(input: PrepareToggleInput): Promise<Prepared
   const configPath = path.resolve(input.configPath);
   const originalBytes = await readConfig(configPath);
   const original = decodeUtf8(originalBytes);
-  const edited = editIndependentMcpEnabled(original, input.serverName, input.enabled);
+  const edited = editCodexEnabled(original, input.serverName, input.enabled, input.target);
   const updatedBytes = Buffer.from(edited.text, 'utf8');
   const afterHash = sha256(updatedBytes);
   const beforeHash = sha256(originalBytes);
@@ -356,8 +365,8 @@ export async function prepareToggle(input: PrepareToggleInput): Promise<Prepared
   const identity = await capturePathIdentity(configPath);
   const plan = planFor({
     configPath, beforeHash, afterHash,
-    diff: afterHash === beforeHash ? 'The independent MCP server already has the requested enabled state.'
-      : `[mcp_servers.${JSON.stringify(input.serverName)}]\n- enabled = ${edited.hadEnabledField ? String(edited.previousEnabled) : 'missing (Codex default: true)'}\n+ enabled = ${String(input.enabled)}`,
+    diff: afterHash === beforeHash ? 'The resource already has the requested enabled state.'
+      : `${targetLabel(input.serverName, input.target)}\n- enabled = ${edited.hadEnabledField ? String(edited.previousEnabled) : 'missing (default/override not set)'}\n+ enabled = ${String(input.enabled)}`,
     desiredEnabled: input.enabled, now, ttlMs: input.ttlMs ?? DEFAULT_TTL_MS,
   });
   return {
@@ -365,6 +374,7 @@ export async function prepareToggle(input: PrepareToggleInput): Promise<Prepared
     private: {
       configPath, serverName: input.serverName, originalBytes, updatedBytes, pathIdentity: identity,
       beforeEnabled: edited.previousEnabled, desiredEnabled: input.enabled,
+      ...(input.target ? { target: input.target } : {}),
     },
   };
 }
@@ -385,6 +395,7 @@ export async function applyPrepared(prepared: PreparedChange, options: EngineOpt
   let journal: JournalRecord = {
     schemaVersion: 1, operationId, stage: 'prepared', plan: prepared.plan, operation,
     configPath: prepared.private.configPath, serverName: prepared.private.serverName,
+    ...(prepared.private.target ? { target: prepared.private.target } : {}),
     beforeHash: prepared.plan.beforeHash, afterHash: prepared.plan.afterHash,
     snapshotPath: null, beforeEnabled: prepared.private.beforeEnabled, desiredEnabled: prepared.private.desiredEnabled,
     preparedIdentity: prepared.private.pathIdentity,
@@ -411,6 +422,7 @@ export async function applyPrepared(prepared: PreparedChange, options: EngineOpt
     const record: AppliedRecord = {
       schemaVersion: 1, operation: succeeded, plan: appliedPlan, configPath: prepared.private.configPath,
       serverName: prepared.private.serverName, beforeHash: prepared.plan.beforeHash, afterHash: prepared.plan.afterHash,
+      ...(prepared.private.target ? { target: prepared.private.target } : {}),
       snapshotPath, beforeEnabled: prepared.private.beforeEnabled, desiredEnabled: prepared.private.desiredEnabled,
       ...(prepared.plan.restoreOf ? { restoreOf: prepared.plan.restoreOf } : {}), appliedIdentity,
     };
@@ -452,7 +464,7 @@ export async function prepareRestore(input: { operationId: string; dataDir: stri
     fail('RECOVERY_CONFLICT', 'This operation has no verified recovery snapshot.');
   }
   const snapshot = await readSnapshot(root, record.snapshotPath, record.beforeHash);
-  const previousDocument = editIndependentMcpEnabled(decodeUtf8(snapshot), record.serverName, record.desiredEnabled ?? true);
+  const previousDocument = editCodexEnabled(decodeUtf8(snapshot), record.serverName, record.desiredEnabled ?? true, record.target);
   const currentIdentity = await capturePathIdentity(record.configPath);
   if (!sameIdentity(record.appliedIdentity, currentIdentity)) fail('PATH_CHANGED', 'The target path identity changed after the operation.');
   const current = await readConfig(record.configPath);
@@ -460,7 +472,7 @@ export async function prepareRestore(input: { operationId: string; dataDir: stri
   const now = safeNow(input.now);
   const plan = planFor({
     configPath: record.configPath, beforeHash: record.afterHash, afterHash: record.beforeHash,
-    diff: `[mcp_servers.${JSON.stringify(record.serverName)}]\n- enabled = ${stateLabel(record.desiredEnabled)}\n+ enabled = ${previousDocument.hadEnabledField ? stateLabel(previousDocument.previousEnabled) : 'missing (Codex default: true)'}\nRestore the exact configuration snapshot saved by this AgentDeck operation.`,
+    diff: `${targetLabel(record.serverName, record.target)}\n- enabled = ${stateLabel(record.desiredEnabled)}\n+ enabled = ${previousDocument.hadEnabledField ? stateLabel(previousDocument.previousEnabled) : 'missing (default/override not set)'}\nRestore the exact configuration snapshot saved by this AgentDeck operation.`,
     desiredEnabled: record.beforeEnabled, now, ttlMs: input.ttlMs ?? DEFAULT_TTL_MS,
     action: 'restore', restoreOf: input.operationId,
     instanceId: record.plan.instanceId, bindingId: record.plan.bindingId,
@@ -470,6 +482,7 @@ export async function prepareRestore(input: { operationId: string; dataDir: stri
     private: {
       configPath: record.configPath, serverName: record.serverName, originalBytes: current, updatedBytes: snapshot,
       pathIdentity: currentIdentity, beforeEnabled: record.desiredEnabled, desiredEnabled: record.beforeEnabled,
+      ...(record.target ? { target: record.target } : {}),
     },
   };
 }
@@ -545,6 +558,7 @@ async function verifiedAppliedOperation(root: string, journal: JournalRecord, op
   if (!isJsonRecord(record) || record.schemaVersion !== 1
     || typeof record.configPath !== 'string' || !samePath(record.configPath, journal.configPath)
     || record.serverName !== journal.serverName
+    || JSON.stringify(record.target) !== JSON.stringify(journal.target)
     || record.beforeHash !== journal.beforeHash || record.afterHash !== journal.afterHash
     || record.snapshotPath !== journal.snapshotPath
     || record.beforeEnabled !== journal.beforeEnabled || record.desiredEnabled !== journal.desiredEnabled
@@ -626,6 +640,7 @@ export async function recoverIncomplete(options: { dataDir: string }): Promise<R
         const operation: Operation = { ...journal.operation, status: 'succeeded', error: null };
         const record: AppliedRecord = {
           schemaVersion: 1, operation, plan, configPath: journal.configPath, serverName: journal.serverName,
+          ...(journal.target ? { target: journal.target } : {}),
           beforeHash: journal.beforeHash, afterHash: journal.afterHash, snapshotPath: journal.snapshotPath,
           beforeEnabled: journal.beforeEnabled, desiredEnabled: journal.desiredEnabled,
           ...(journal.plan.restoreOf ? { restoreOf: journal.plan.restoreOf } : {}), appliedIdentity,

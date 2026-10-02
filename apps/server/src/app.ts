@@ -7,19 +7,24 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   API_PREFIX, ApplyPlanSchema, BootstrapSchema, CreatePlanSchema,
-  RegisterInstanceSchema, RegisterProjectSchema, ScanRequestSchema,
-  type AgentAdapter, type ApiError, type ChangePlan,
+  RegisterInstanceSchema, RegisterProjectSchema, ScanRequestSchema, VersionCheckRequestSchema,
+  type AgentAdapter, type ApiError, type ChangePlan, type CompatibilityReport,
   type Operation, type SseEvent,
 } from '@agentdeck/contracts';
-import { ManagerError, ManagerService } from '@agentdeck/core';
+import { ManagerError, ManagerService, type ExecutableResolver, type VersionCheckRunner } from '@agentdeck/core';
 import { createStore, type AgentDeckStore } from '@agentdeck/storage';
 import { createAdapterRegistry } from '@agentdeck/adapters';
 import * as defaultChangeEngine from '@agentdeck/change-engine';
 
 type PreparedChange = { plan: ChangePlan; private: unknown };
+
+function verifiedBasicCodex(instance: { versionEvidence?: import('@agentdeck/contracts').ClientVersionEvidence | null }): boolean {
+  const evidence = instance.versionEvidence;
+  return evidence?.signature === 'codex-cli-version' && evidence.version === '0.159.2' && evidence.platform === 'win32';
+}
 type ApplyResult = { plan: ChangePlan; operation: Operation; journalPath?: string; snapshotPath?: string };
 export interface ChangeEngine {
-  prepareToggle(input: { configPath: string; serverName: string; enabled: boolean; now?: Date; ttlMs?: number }): Promise<PreparedChange> | PreparedChange;
+  prepareToggle(input: { configPath: string; serverName: string; enabled: boolean; now?: Date; ttlMs?: number; target?: defaultChangeEngine.CodexToggleTarget }): Promise<PreparedChange> | PreparedChange;
   applyPrepared(prepared: PreparedChange, options: { dataDir: string; now?: Date }): Promise<ApplyResult> | ApplyResult;
   prepareRestore(input: { operationId: string; dataDir: string; now?: Date; ttlMs?: number }): Promise<PreparedChange> | PreparedChange;
   recoverIncomplete?(input: { dataDir: string }): Promise<RecoveryReport> | RecoveryReport;
@@ -49,6 +54,9 @@ export interface AppOptions {
   port?: number;
   devMode?: boolean;
   now?: () => Date;
+  executableResolver?: ExecutableResolver;
+  versionRunner?: VersionCheckRunner;
+  platform?: NodeJS.Platform;
   closeStoreOnClose?: boolean;
   logger?: boolean;
 }
@@ -75,7 +83,13 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
   const registry = resolveRegistry(options.adapterRegistry ?? options.adapters);
   const demoDir = options.demoDir ?? (process.env.AGENTDECK_HOME ? path.join(dataDir, 'demo') : path.join(workspaceRoot(), 'work', 'demo'));
   const discoveryEnv = options.discoveryEnv ?? (options.homeDir !== undefined ? {} : process.env);
-  const manager = new ManagerService({ store, adapters: registry, homeDir, demoDir, env: discoveryEnv, ...(options.now ? { now: options.now } : {}) });
+  const manager = new ManagerService({
+    store, adapters: registry, homeDir, demoDir, env: discoveryEnv, isolationRoot: dataDir,
+    ...(options.now ? { now: options.now } : {}),
+    ...(options.executableResolver ? { executableResolver: options.executableResolver } : {}),
+    ...(options.versionRunner ? { versionRunner: options.versionRunner } : {}),
+    ...(options.platform ? { platform: options.platform } : {}),
+  });
   const engine = options.changeEngine ?? defaultChangeEngine as unknown as ChangeEngine;
   const app = Fastify({ logger: options.logger ?? false, genReqId: () => randomUUID() });
   const tickets = new Map<string, BootstrapTicket>();
@@ -161,6 +175,7 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
   });
 
   app.get(`${API}/adapters`, async () => manager.adapterInfos());
+  app.get(`${API}/compatibility`, async () => manager.compatibilityReport());
   app.get(`${API}/catalog`, async () => manager.catalog());
   app.post(`${API}/instances`, async (request, reply) => {
     const input = RegisterInstanceSchema.safeParse(request.body);
@@ -201,6 +216,15 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
     app.agentdeckEvents.publish({ type: 'catalog.changed', payload: { kind: 'scan', lastScanAt: catalog.lastScanAt } });
     return catalog;
   });
+  app.post(`${API}/instances/:id/version-check`, async (request) => {
+    const body = VersionCheckRequestSchema.safeParse(request.body ?? {});
+    if (!body.success) throw new ManagerError(400, 'INVALID_REQUEST', 'Version checks do not accept a command or executable from the client.');
+    const { id } = request.params as { id: string };
+    const report = await manager.checkVersion(id);
+    await manager.scan({ instanceId: id });
+    app.agentdeckEvents.publish({ type: 'catalog.changed', instanceId: id, payload: { kind: 'compatibility-check' } });
+    return report satisfies CompatibilityReport;
+  });
   app.post(`${API}/demo`, async (_request, reply) => {
     const catalog = await manager.initializeDemo();
     reply.code(200);
@@ -211,18 +235,35 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
   app.post(`${API}/plans`, async (request, reply) => {
     const input = CreatePlanSchema.safeParse(request.body);
     if (!input.success) throw new ManagerError(400, 'INVALID_REQUEST', 'A binding ID and desired enabled state are required.');
-    const binding = store.getBinding(input.data.bindingId);
+    let binding = store.getBinding(input.data.bindingId);
     if (!binding) throw new ManagerError(404, 'BINDING_NOT_FOUND', 'The selected resource binding no longer exists.');
-    const instance = store.getInstance(binding.instanceId);
-    if (!instance || binding.kind !== 'mcp' || instance.agentId !== 'codex') throw new ManagerError(403, 'UNSUPPORTED_OPERATION', 'Only a Codex MCP binding can be changed in this release.');
+    let instance = store.getInstance(binding.instanceId);
+    if (!instance || instance.agentId !== 'codex') throw new ManagerError(403, 'UNSUPPORTED_OPERATION', 'Only supported Codex resources can be changed.');
+    if (binding.kind !== 'mcp') {
+      await manager.compatibilityReport();
+      instance = store.getInstance(binding.instanceId)!;
+      await manager.scan({ instanceId: instance.id });
+      binding = store.getBinding(input.data.bindingId);
+      if (!binding) throw new ManagerError(404, 'BINDING_NOT_FOUND', 'The selected resource no longer exists.');
+    }
+    const independentMcp = binding.kind === 'mcp' && binding.parentId === null && binding.projectId === null && binding.scope === 'native' && binding.sourceKind === 'user';
+    const supportedSkill = binding.kind === 'skill' && binding.controlScope === 'user-config-skill' && binding.parentId === null && binding.projectId === null && binding.scope === 'user-global' && binding.sourceKind === 'user';
+    const supportedPlugin = binding.kind === 'plugin' && binding.controlScope === 'local-marketplace-plugin' && binding.parentId === null && binding.projectId === null && binding.origin === 'cache' && Boolean(binding.pluginId);
+    if (!independentMcp && !supportedSkill && !supportedPlugin) {
+      throw new ManagerError(403, 'UNSUPPORTED_OPERATION', binding.readOnlyReason ?? 'This resource has no verified control mechanism.');
+    }
+    if (!independentMcp && !verifiedBasicCodex(instance)) throw new ManagerError(403, 'POLICY_LOCKED', 'This control requires checked Codex CLI 0.159.2 on Windows.');
     const isolatedDemo = instance.discovery === 'demo' && isWithin(binding.sourcePath, manager.demoDir);
     if (!isolatedDemo && (instance.discovery !== 'manual' || !instance.writable || !binding.writable)) {
       throw new ManagerError(403, 'POLICY_LOCKED', binding.readOnlyReason ?? 'Write access requires an explicitly registered writable Codex instance.');
     }
-    if (!isWithin(binding.sourcePath, instance.configRoot)) throw new ManagerError(403, 'PATH_OUTSIDE_SCOPE', 'The binding file is outside the registered Codex configuration root.');
+    const configPath = independentMcp ? binding.sourcePath : path.join(instance.configRoot, 'config.toml');
+    if (!isWithin(binding.sourcePath, instance.configRoot) || !isWithin(configPath, instance.configRoot)) throw new ManagerError(403, 'PATH_OUTSIDE_SCOPE', 'The binding file is outside the registered Codex configuration root.');
+    const target: defaultChangeEngine.CodexToggleTarget | undefined = supportedSkill ? { kind: 'skill', path: path.join(binding.sourcePath, 'SKILL.md') }
+      : supportedPlugin ? { kind: 'plugin', id: binding.pluginId! } : undefined;
     let enginePlan: PreparedChange;
     try {
-      enginePlan = await engine.prepareToggle({ configPath: binding.sourcePath, serverName: binding.name, enabled: input.data.enabled, ...(options.now ? { now: options.now() } : {}) });
+      enginePlan = await engine.prepareToggle({ configPath, serverName: binding.name, enabled: input.data.enabled, ...(target ? { target } : {}), ...(options.now ? { now: options.now() } : {}) });
     } catch (error) {
       const mapped = sanitizedEngineError(error);
       throw new ManagerError(mapped.status, mapped.code, mapped.message);
@@ -246,6 +287,19 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
     if (stored.dto.expiresAt && Date.parse(stored.dto.expiresAt) < Date.now()) {
       store.updatePlanStatus(id, 'expired');
       throw new ManagerError(410, 'PLAN_EXPIRED', 'The change plan expired; create a new plan from the current configuration.');
+    }
+    const controlledTarget = (stored.privateData as defaultChangeEngine.PreparedChange).private?.target;
+    if (controlledTarget) {
+      await manager.compatibilityReport();
+      await manager.scan({ instanceId: stored.dto.instanceId });
+      const currentInstance = store.getInstance(stored.dto.instanceId);
+      const currentBinding = store.getBinding(stored.dto.bindingId);
+      if (!currentInstance || !verifiedBasicCodex(currentInstance) || currentInstance.discovery !== 'manual' || !currentInstance.writable || !currentBinding?.writable
+        || path.resolve(stored.dto.targetPath) !== path.resolve(currentInstance.configRoot, 'config.toml')
+        || (controlledTarget.kind === 'skill' ? currentBinding.controlScope !== 'user-config-skill' || controlledTarget.path !== path.join(currentBinding.sourcePath, 'SKILL.md')
+          : currentBinding.controlScope !== 'local-marketplace-plugin' || currentBinding.pluginId !== controlledTarget.id)) {
+        throw new ManagerError(403, 'POLICY_LOCKED', 'The resource write permission or verified client scope changed; create a new plan after verifying it.');
+      }
     }
     let applied: ApplyResult;
     const priorBinding = store.getBinding(stored.dto.bindingId);

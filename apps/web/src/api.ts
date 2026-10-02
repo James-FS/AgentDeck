@@ -2,8 +2,13 @@ import type {
   AdapterInfo,
   AgentInstance,
   ApiError,
+  CapabilityEvidence,
   Catalog,
   ChangePlan,
+  ClientCompatibilityReport,
+  ClientVersionEvidence,
+  CompatibilityReport,
+  ExecutableIdentity,
   Operation,
   Project,
   SessionResponse,
@@ -99,6 +104,7 @@ function validateCatalog(value: unknown): Catalog {
     && (entry.configurationKey === undefined || typeof entry.configurationKey === 'string')
     && (entry.configurationEnabled === undefined || entry.configurationEnabled === null || typeof entry.configurationEnabled === 'boolean')
     && (entry.cacheState === undefined || ['present', 'missing', 'unknown'].includes(String(entry.cacheState)))
+    && (entry.mcpTransport === undefined || ['stdio', 'http', 'unknown'].includes(String(entry.mcpTransport)))
     && Array.isArray(entry.diagnostics) && entry.diagnostics.every((item) => typeof item === 'string')
     && typeof entry.updatedAt === 'string');
   if (!validInstances || !validProjects || !validBindings) {
@@ -134,6 +140,56 @@ function validateOperation(value: unknown): Operation {
   return value as unknown as Operation;
 }
 
+function validateExecutableIdentity(value: unknown): value is ExecutableIdentity {
+  return isRecord(value) && typeof value.path === 'string' && typeof value.realPath === 'string'
+    && typeof value.fileIdentity === 'string' && typeof value.checkedAt === 'string';
+}
+
+function validateVersionEvidence(value: unknown): value is ClientVersionEvidence {
+  return isRecord(value) && typeof value.version === 'string'
+    && ['codex-cli-version', 'claude-code-version'].includes(String(value.signature))
+    && validateExecutableIdentity(value.executable) && typeof value.platform === 'string'
+    && typeof value.checkedAt === 'string';
+}
+
+function validateCapabilityEvidence(value: unknown): value is CapabilityEvidence {
+  return isRecord(value)
+    && ['static-scan', 'fixture-validation', 'native-config', 'runtime'].includes(String(value.area))
+    && (value.resourceKind === null || ['skill', 'plugin', 'mcp'].includes(String(value.resourceKind)))
+    && (value.scope === null || ['user-global', 'project', 'project-directory', 'native'].includes(String(value.scope)))
+    && (value.sourceKind === undefined || value.sourceKind === null || ['user', 'repository', 'plugin', 'builtin', 'organization', 'account-sync', 'unknown'].includes(String(value.sourceKind)))
+    && (value.controlScope === undefined || ['standalone-user-mcp', 'user-config-skill', 'local-marketplace-plugin'].includes(String(value.controlScope)))
+    && (value.mcpTransport === undefined || ['stdio', 'http', 'unknown'].includes(String(value.mcpTransport)))
+    && (value.operations === undefined || (Array.isArray(value.operations) && value.operations.every(operation => ['scan', 'toggle', 'restore', 'runtime-observation'].includes(String(operation)))) )
+    && ['verified', 'partial', 'unverified', 'unsupported'].includes(String(value.status))
+    && typeof value.readable === 'boolean' && typeof value.writable === 'boolean' && typeof value.reason === 'string'
+    && (value.evidenceReference === undefined || typeof value.evidenceReference === 'string')
+    && (value.clientVersion === undefined || typeof value.clientVersion === 'string')
+    && (value.platform === undefined || typeof value.platform === 'string');
+}
+
+function validateClientCompatibility(value: unknown): value is ClientCompatibilityReport {
+  return isRecord(value) && typeof value.id === 'string' && typeof value.agentId === 'string' && typeof value.agentName === 'string'
+    && (value.instanceId === null || typeof value.instanceId === 'string')
+    && (value.instanceName === null || typeof value.instanceName === 'string')
+    && (value.configRoot === null || typeof value.configRoot === 'string')
+    && ['verified-client', 'executable-unverified', 'configuration-only', 'not-found', 'demo'].includes(String(value.status))
+    && ['present', 'missing'].includes(String(value.configurationState))
+    && (value.executableCandidate === null || validateExecutableIdentity(value.executableCandidate))
+    && (value.versionEvidence === null || validateVersionEvidence(value.versionEvidence))
+    && Array.isArray(value.capabilities) && value.capabilities.every(validateCapabilityEvidence)
+    && (value.checkedAt === null || typeof value.checkedAt === 'string')
+    && Array.isArray(value.diagnostics) && value.diagnostics.every(item => typeof item === 'string');
+}
+
+function validateCompatibilityReport(value: unknown): CompatibilityReport {
+  if (!isRecord(value) || typeof value.generatedAt !== 'string' || !Array.isArray(value.clients)
+    || !value.clients.every(validateClientCompatibility)) {
+    throw new ApiFailure('服务返回的客户端兼容报告格式无效。', 200, 'INVALID_RESPONSE');
+  }
+  return value as unknown as CompatibilityReport;
+}
+
 function validateInstance(value: unknown): AgentInstance {
   if (!isRecord(value) || typeof value.id !== 'string' || typeof value.agentId !== 'string'
     || typeof value.name !== 'string' || typeof value.configRoot !== 'string'
@@ -141,6 +197,7 @@ function validateInstance(value: unknown): AgentInstance {
     || (value.executable !== null && typeof value.executable !== 'string')
     || !['auto', 'manual', 'demo'].includes(String(value.discovery))
     || typeof value.writable !== 'boolean' || typeof value.checkedAt !== 'string'
+    || (value.versionEvidence !== undefined && value.versionEvidence !== null && !validateVersionEvidence(value.versionEvidence))
     || !Array.isArray(value.diagnostics) || !value.diagnostics.every((item) => typeof item === 'string')) {
     throw new ApiFailure('服务返回的 Agent 实例格式无效。', 200, 'INVALID_RESPONSE');
   }
@@ -184,6 +241,17 @@ export const api = {
       throw new ApiFailure('服务返回的客户端能力列表格式无效。', 200, 'INVALID_RESPONSE');
     }
     return list as AdapterInfo[];
+  },
+
+  async compatibility(): Promise<CompatibilityReport> {
+    return validateCompatibilityReport(await request<unknown>(`${API}/compatibility`));
+  },
+
+  async checkVersion(instanceId: string): Promise<CompatibilityReport> {
+    return validateCompatibilityReport(await request<unknown>(`${API}/instances/${encodeURIComponent(instanceId)}/version-check`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }));
   },
 
   async scan(options: { discover?: boolean; discoverUserHome?: boolean; instanceId?: string; projectId?: string }): Promise<Catalog> {

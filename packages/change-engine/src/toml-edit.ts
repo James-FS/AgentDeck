@@ -1,5 +1,6 @@
 import TOML from '@iarna/toml';
-import { ChangeEngineError } from './types.js';
+import path from 'node:path';
+import { ChangeEngineError, type CodexToggleTarget } from './types.js';
 
 interface Line { text: string; start: number; end: number; newline: string }
 interface Header { line: number; keys: string[]; array: boolean }
@@ -215,24 +216,40 @@ function advanceLexState(line: string, state: LexState): void {
 export interface EditedToml { text: string; previousEnabled: boolean | null; hadEnabledField: boolean }
 
 export function editIndependentMcpEnabled(original: string, serverName: string, desired: boolean): EditedToml {
+  return editCodexEnabled(original, serverName, desired);
+}
+
+export function editCodexEnabled(original: string, serverName: string, desired: boolean, control?: CodexToggleTarget): EditedToml {
   let parsed: Record<string, unknown>;
   try { parsed = TOML.parse(parserView(original)) as Record<string, unknown>; }
   catch { return invalid(); }
-  const mcpServers = parsed.mcp_servers;
+  if (control?.kind === 'skill') return editSkillEnabled(original, parsed, control.path, desired);
+  const section = control?.kind === 'plugin' ? 'plugins' : 'mcp_servers';
+  const name = control?.kind === 'plugin' ? control.id : serverName;
+  const mcpServers = parsed[section];
   if (!mcpServers || typeof mcpServers !== 'object' || Array.isArray(mcpServers)
-    || !Object.prototype.hasOwnProperty.call(mcpServers, serverName)) return ambiguous();
-  const target = (mcpServers as Record<string, unknown>)[serverName];
+    || !Object.prototype.hasOwnProperty.call(mcpServers, name)) return ambiguous();
+  const target = (mcpServers as Record<string, unknown>)[name];
   if (!target || typeof target !== 'object' || Array.isArray(target)) return ambiguous('The requested MCP declaration is not a regular table.');
   const before = (target as Record<string, unknown>).enabled;
   if (before !== undefined && typeof before !== 'boolean') return invalid('The enabled field is not a TOML boolean.');
   const previousEnabled = before === undefined ? true : before;
 
-  const lines = linesOf(original);
   const headers = headerList(original);
-  const matches = headers.filter((header) => !header.array && header.keys.length === 2 && header.keys[0] === 'mcp_servers' && header.keys[1] === serverName);
+  const matches = headers.filter((header) => !header.array && header.keys.length === 2 && header.keys[0] === section && header.keys[1] === name);
   if (matches.length !== 1) return ambiguous();
   const targetHeader = matches[0];
   if (!targetHeader) return ambiguous();
+  return editSection(original, targetHeader, previousEnabled, desired, text => {
+    const result = TOML.parse(parserView(text)) as Record<string, unknown>;
+    const entries = result[section] as Record<string, Record<string, unknown>>;
+    if (entries?.[name]?.enabled !== desired) invalid('The edited Codex table did not preserve the requested state.');
+  });
+}
+
+function editSection(original: string, targetHeader: Header, previousEnabled: boolean, desired: boolean, validate: (text: string) => void): EditedToml {
+  const lines = linesOf(original);
+  const headers = headerList(original);
   const nextHeader = headers.find((header) => header.line > targetHeader.line);
   const sectionEndLine = nextHeader?.line ?? lines.length;
   const stateAssignments: Array<{ line: number; equals: number; value: boolean }> = [];
@@ -264,7 +281,7 @@ export function editIndependentMcpEnabled(original: string, serverName: string, 
     const tokenEnd = tokenStart + (match[2]?.length ?? 0);
     const updatedLine = line.text.slice(0, tokenStart) + String(desired) + line.text.slice(tokenEnd);
     const updated = original.slice(0, line.start) + updatedLine + line.newline + original.slice(line.end);
-    validateEditedToml(updated, serverName, desired);
+    validate(updated);
     return { text: updated, previousEnabled, hadEnabledField: true };
   }
 
@@ -276,18 +293,39 @@ export function editIndependentMcpEnabled(original: string, serverName: string, 
   const keepFinalNewline = insertionOffset === original.length && /(?:\r\n|\n|\r)$/.test(original);
   const inserted = `${prefix}enabled = ${String(desired)}${insertionOffset < original.length || keepFinalNewline ? newline : ''}`;
   const updated = original.slice(0, insertionOffset) + inserted + original.slice(insertionOffset);
-  validateEditedToml(updated, serverName, desired);
+  validate(updated);
   return { text: updated, previousEnabled, hadEnabledField: false };
 }
 
-function validateEditedToml(text: string, serverName: string, desired: boolean): void {
-  try {
-    const result = TOML.parse(parserView(text)) as Record<string, unknown>;
-    const servers = result.mcp_servers as Record<string, unknown> | undefined;
-    const target = servers?.[serverName] as Record<string, unknown> | undefined;
-    if (!target || target.enabled !== desired) invalid('The edited Codex TOML did not preserve the requested table structure.');
-  } catch (error) {
-    if (error instanceof ChangeEngineError) throw error;
-    invalid('The edited Codex TOML did not pass syntax validation.');
+function skillPathKey(value: string): string {
+  const resolved = path.resolve(value);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function editSkillEnabled(original: string, parsed: Record<string, unknown>, manifestPath: string, desired: boolean): EditedToml {
+  if (!path.isAbsolute(manifestPath) || path.basename(manifestPath) !== 'SKILL.md') return ambiguous('Skill control requires an absolute SKILL.md path.');
+  const skills = parsed.skills as Record<string, unknown> | undefined;
+  const config = skills?.config;
+  if (skills !== undefined && (!skills || typeof skills !== 'object' || Array.isArray(skills))) return invalid();
+  if (config !== undefined && !Array.isArray(config)) return ambiguous('Skill overrides must use regular array-of-table entries.');
+  const rows = (config ?? []) as Array<Record<string, unknown>>;
+  if (rows.some(row => !row || typeof row !== 'object' || typeof row.path !== 'string' || !path.isAbsolute(row.path) || (row.enabled !== undefined && typeof row.enabled !== 'boolean'))) return invalid('Skill overrides contain unsupported paths or enabled values.');
+  const matches = rows.map((row, index) => skillPathKey(row.path as string) === skillPathKey(manifestPath) ? index : -1).filter(index => index !== -1);
+  if (matches.length > 1) return ambiguous('More than one override addresses this Skill path.');
+  const headers = headerList(original).filter(header => header.array && header.keys.length === 2 && header.keys[0] === 'skills' && header.keys[1] === 'config');
+  if (headers.length !== rows.length || (config !== undefined && headers.length === 0)) return ambiguous('Inline or otherwise unsupported Skill overrides cannot be edited.');
+  const validate = (text: string) => {
+    const result = TOML.parse(parserView(text)) as { skills?: { config?: Array<{ path: string; enabled: boolean }> } };
+    const matched = result.skills?.config?.filter(row => skillPathKey(row.path) === skillPathKey(manifestPath));
+    if (matched?.length !== 1 || matched[0]?.enabled !== desired) invalid('The edited Skill override did not preserve its target.');
+  };
+  if (matches.length === 1) {
+    const index = matches[0]!;
+    return editSection(original, headers[index]!, (rows[index]!.enabled as boolean | undefined) ?? true, desired, validate);
   }
+  if (desired) return { text: original, previousEnabled: true, hadEnabledField: false };
+  const newline = linesOf(original).find(line => line.newline)?.newline ?? '\n';
+  const text = original + (original.endsWith('\n') || !original ? '' : newline) + `${newline}[[skills.config]]${newline}path = ${JSON.stringify(manifestPath)}${newline}enabled = ${desired}${newline}`;
+  validate(text);
+  return { text, previousEnabled: true, hadEnabledField: false };
 }

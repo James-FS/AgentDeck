@@ -1,5 +1,9 @@
 # AgentDeck
 
+初期版本聚焦已有 MCP、插件和 Skill 的查看、来源/范围/配置状态、经验证的单项启停，以及变更预览、备份和恢复。没有原生依据的控制能力明确只读。组合分发、导入部署、主动诊断、安装更新、桌面壳、多平台和 SDK 初期不实现；详细范围见 [实施方案](docs/实施方案.md)和[开发任务清单](docs/开发任务清单.md)。
+
+基础版现已支持 Codex 配置根独立 Skill 和已配置的本地市场插件整体开关，限定已检查的 CLI 0.159.2 / Windows、手动明确可写实例；复用预览、备份、冲突检测与精确恢复，不修改 Skill 原文或插件缓存。启动和支持范围见 [基础版使用与验收](docs/基础版使用与验收.md)。
+
 ## 快速开始
 
 需要 Node.js 24.7.0 和 pnpm 11.22.0。在仓库根目录运行：
@@ -15,13 +19,15 @@ pnpm dev
 
 首次打开资源页，点击“发现并扫描本机资源”读取当前用户的实际客户端配置；这会跳过开发模式默认的隔离扫描目录。扫描结果保存到本地索引，真实配置不会被改写。“重新扫描已登记实例”只刷新已经接入的目录。也可以载入隔离演示数据体验交互。
 
-自动发现的实例只读。只有手动登记并明确勾选可写的 Codex 实例可生成受支持的独立 MCP 计划；演示目标使用独立文件。本机只读配置与插件缓存布局已经核对，版本记录与证据范围见 [只读扫描兼容验证](docs/只读扫描兼容验证.md)；真实写入与运行时生效仍未验证，写入能力标为 experimental。原始计划字节和恢复快照可能包含秘密；当前保存为明文，没有额外加密或显式设置 Windows ACL，Windows 使用数据目录继承的系统 ACL。请将 `AGENTDECK_HOME` 放在仅当前用户可访问的位置，不要使用共享目录。
+自动发现的实例只读。只有手动登记并明确勾选可写的 Codex 实例可生成受支持的独立 MCP 计划；演示目标使用独立文件。本机只读配置与插件缓存布局已经核对，见 [只读扫描兼容验证](docs/只读扫描兼容验证.md)。实际 Codex CLI 0.159.2 已在 Windows 隔离配置根完成独立用户级 STDIO MCP 的启停、原生复读与恢复验收，见 [客户端兼容与原生验收](docs/客户端兼容与原生验收.md)；用户真实配置仍未作为写入目标，运行时生效未验证。未匹配版本或范围的能力保持实验性或只读。原始计划字节和恢复快照可能包含秘密；当前保存为明文，没有额外加密或显式设置 Windows ACL，Windows 使用数据目录继承的系统 ACL。请将 `AGENTDECK_HOME` 放在仅当前用户可访问的位置，不要使用共享目录。
 
 AgentDeck is a local web manager for viewing Agent configuration instances, projects, Skills, plugins, and MCP entries. The first release provides a Vue 3 interface, a Fastify local API, SQLite persistence, four read-only adapter scanners, and a guarded Codex MCP plan/apply/restore path.
 
-Read-only configuration and plugin cache layouts have been checked on this Windows machine; version observations and validation limits are recorded in [the compatibility report](docs/只读扫描兼容验证.md). Runtime activation and real-client writing remain unverified. Automatic discovery is read-only. A real write plan is available only for an explicitly registered Codex configuration root marked writable, and only for a supported independent MCP entry. The demo has a separate, isolated Codex target that exercises the same plan path without changing a real client configuration. The app does not start Skills, plugins, or MCP processes.
+Read-only configuration and plugin cache layouts have been checked on this Windows machine. Codex CLI 0.159.2 has additionally passed native configuration reread and toggle/restore validation for independent user STDIO MCP entries in isolated configuration roots; see [the native compatibility report](docs/客户端兼容与原生验收.md). Runtime activation remains unverified. Automatic discovery is read-only. A write plan is available only for an explicitly registered Codex configuration root marked writable, and only for a supported independent MCP entry. The demo has a separate, isolated Codex target. The app does not start Skills, plugins, or MCP processes. An explicit version check runs only the supported CLI's bounded `--version` command in an isolated environment.
 
 插件缓存按市场、插件身份与版本建立父子索引。资源页可区分缓存、配置记录和本地文件；详情分别展示资源配置状态、关联配置证据、缓存状态与未知运行状态。登记项目后点击项目卡片的“扫描项目”，读取该项目范围的候选配置和 Skills；项目配置及插件资源保持只读。
+
+实例页提供客户端兼容报告，区分已识别 CLI、未验证的可执行候选、仅有配置、未发现和隔离演示。显式检查版本后，证据按可执行路径及文件身份保存；替换、删除或检查失败使旧证据失效。静态扫描、夹具、原生配置和运行时证据分别展示。检查版本不会开放写入许可。机器可读验收矩阵位于 [docs/compatibility.json](docs/compatibility.json)。
 
 ## Requirements
 
@@ -65,6 +71,8 @@ The JSON API is under `/api/v1`. Useful routes are:
 
 - `GET /health` — startup status and application version, without filesystem paths or credentials.
 - `GET /api/v1/adapters` and `GET /api/v1/catalog` — adapter capabilities and the current local catalog.
+- `GET /api/v1/compatibility` — client identity observations and capability evidence, including unregistered adapters.
+- `POST /api/v1/instances/:id/version-check` with `{}` — explicitly query a supported CLI version in isolated state; command paths cannot be supplied by the browser.
 - `POST /api/v1/instances` and `POST /api/v1/projects` — explicitly register a configuration root or project.
 - `POST /api/v1/scans` — scan registered instances, optionally discover instances or select a project.
 - `POST /api/v1/demo` — create or refresh the isolated example catalog.

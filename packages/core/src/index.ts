@@ -1,9 +1,17 @@
 import { createHash } from 'node:crypto';
-import { mkdir, writeFile, access } from 'node:fs/promises';
+import { mkdir, writeFile, access, mkdtemp, rm, stat } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import type {
-  AdapterInfo, AgentAdapter, AgentInstance, Binding, Catalog, Project,
+  AdapterInfo, AgentAdapter, AgentId, AgentInstance, Binding, Catalog, ClientCompatibilityReport,
+  ClientVersionEvidence, CompatibilityReport, ExecutableIdentity, Project,
 } from '@agentdeck/contracts';
+import {
+  inspectExecutable, parseRecognizedVersion, resolvePathExecutable, runVersionCommand, sameExecutable,
+  VERSION_CHECK_MAX_OUTPUT_BYTES, VERSION_CHECK_TIMEOUT_MS,
+  type ExecutableResolver, type VersionCheckRunner,
+} from './version-check.js';
+import { buildCapabilityEvidence } from './compatibility.js';
 
 type RegisterInstanceInput = { agentId: string; name?: string; configRoot: string; writable?: boolean };
 type RegisterProjectInput = { name?: string; rootPath: string };
@@ -15,6 +23,10 @@ export interface ManagerOptions {
   homeDir: string;
   demoDir?: string;
   env?: NodeJS.ProcessEnv;
+  isolationRoot?: string;
+  executableResolver?: ExecutableResolver;
+  versionRunner?: VersionCheckRunner;
+  platform?: NodeJS.Platform;
   now?: () => Date;
 }
 
@@ -34,6 +46,10 @@ export class ManagerService {
   readonly homeDir: string;
   readonly demoDir: string;
   readonly env: NodeJS.ProcessEnv;
+  readonly isolationRoot: string;
+  readonly executableResolver: ExecutableResolver;
+  readonly versionRunner: VersionCheckRunner;
+  readonly platform: NodeJS.Platform;
   private readonly now: () => Date;
 
   constructor(options: ManagerOptions) {
@@ -42,11 +58,240 @@ export class ManagerService {
     this.homeDir = path.resolve(options.homeDir);
     this.demoDir = path.resolve(options.demoDir ?? (process.env.AGENTDECK_HOME ? path.join(process.env.AGENTDECK_HOME, 'demo') : path.join(process.cwd(), 'work', 'demo')));
     this.env = options.env ?? process.env;
+    this.isolationRoot = path.resolve(options.isolationRoot ?? path.join(os.tmpdir(), `agentdeck-version-checks-${process.pid}`));
+    this.executableResolver = options.executableResolver ?? resolvePathExecutable;
+    this.versionRunner = options.versionRunner ?? runVersionCommand;
+    this.platform = options.platform ?? process.platform;
     this.now = options.now ?? (() => new Date());
   }
 
   catalog(): Catalog { return this.store.catalog(); }
   adapterInfos(): AdapterInfo[] { return this.adapters.map(adapter => adapter.info); }
+
+  async compatibilityReport(): Promise<CompatibilityReport> {
+    const generatedAt = this.now().toISOString();
+    const catalog = this.store.catalog();
+    const clients: ClientCompatibilityReport[] = [];
+    for (const adapter of this.adapters) {
+      const registered = catalog.instances.filter(instance => instance.agentId === adapter.id);
+      if (registered.length === 0) {
+        const knownAgent = isAgentId(adapter.id);
+        const agentId = adapter.id as AgentId;
+        const configRoot = knownAgent ? this.defaultConfigRoot(agentId) : null;
+        const candidate = knownAgent ? await this.currentExecutable(agentId, generatedAt) : null;
+        const configurationState = configRoot && await directoryExists(configRoot) ? 'present' : 'missing';
+        const status = candidate ? 'executable-unverified' : configurationState === 'present' ? 'configuration-only' : 'not-found';
+        clients.push({
+          id: stableId('compatibility', `${agentId}\0unregistered`), agentId, agentName: adapter.info.name,
+          instanceId: null, instanceName: null, configRoot, status, configurationState,
+          executableCandidate: candidate, versionEvidence: null, checkedAt: null,
+          capabilities: buildCapabilityEvidence({ agentId, versionEvidence: null, optedInCodexWrite: false }),
+          diagnostics: [
+            ...(candidate ? ['A PATH executable candidate exists; no recognized client version has been checked. This does not prove an official installation.'] : []),
+            ...(configurationState === 'present' && !candidate ? ['The configuration directory exists, but no PATH executable candidate was found.'] : []),
+          ],
+        });
+        continue;
+      }
+      for (const instance of registered) clients.push(await this.clientCompatibility(adapter.info.name, instance, generatedAt));
+    }
+    return { generatedAt, clients };
+  }
+
+  async checkVersion(instanceId: string): Promise<CompatibilityReport> {
+    const instance = this.store.getInstance(instanceId);
+    if (!instance) throw new ManagerError(404, 'INSTANCE_NOT_FOUND', 'The selected Agent instance is not registered.');
+    if (instance.discovery === 'demo') {
+      const diagnostics = instance.diagnostics.filter(item => !item.startsWith('Version check:'));
+      diagnostics.push('Version check: isolated demo instances do not probe host executables.');
+      this.store.putInstance({ ...instance, version: null, executable: null, versionEvidence: null, diagnostics });
+      return this.compatibilityReport();
+    }
+    const agentId = instance.agentId as AgentId;
+    const checkedAt = this.now().toISOString();
+    let candidate: ExecutableIdentity | null = null;
+    let versionEvidence: ClientVersionEvidence | null = null;
+    let message: string | null = null;
+    try {
+      if (!isAgentId(instance.agentId)) throw new Error('unsupported-client');
+      const executable = await this.executableResolver(agentId, this.env);
+      candidate = executable ? await inspectExecutable(executable, checkedAt) : null;
+      if (!candidate) {
+        message = 'Version check: no executable candidate was found on the service PATH.';
+      } else if (agentId !== 'codex' && agentId !== 'claude-code') {
+        message = 'Version check: no validated version command is available for this client.';
+      } else {
+        const isolated = await this.createIsolatedVersionEnvironment(agentId, instanceId);
+        try {
+          const output = await this.versionRunner({
+            executable: candidate.path, args: ['--version'], cwd: isolated.cwd, env: isolated.env,
+            timeoutMs: VERSION_CHECK_TIMEOUT_MS, maxOutputBytes: VERSION_CHECK_MAX_OUTPUT_BYTES,
+          });
+          const parsed = output.exitCode === 0 ? parseRecognizedVersion(agentId, output.stdout) : null;
+          if (!parsed) {
+            message = 'Version check: output did not match the exact recognized CLI version signature.';
+          } else {
+            versionEvidence = { ...parsed, executable: candidate, platform: this.platform, checkedAt };
+          }
+        } catch {
+          message = 'Version check: the isolated version command failed, timed out, or exceeded its output limit.';
+        } finally {
+          await rm(isolated.directory, { recursive: true, force: true }).catch(() => undefined);
+        }
+      }
+    } catch {
+      message = 'Version check: the service could not resolve or inspect a PATH executable candidate.';
+    }
+    const confirmedCandidate = candidate ? await inspectExecutable(candidate.path, checkedAt) : null;
+    const confirmedEvidence = versionEvidence && sameExecutable(candidate, confirmedCandidate) ? versionEvidence : null;
+    if (versionEvidence && !confirmedEvidence) message = 'Version check: the executable changed while its version was being checked; stored version evidence was discarded.';
+    const latestInstance = this.store.getInstance(instanceId) ?? instance;
+    const diagnostics = latestInstance.diagnostics.filter(item => !item.startsWith('Version check:'));
+    if (message) diagnostics.push(message);
+    this.store.putInstance({
+      ...latestInstance,
+      executable: confirmedCandidate?.path ?? null,
+      version: confirmedEvidence?.version ?? null,
+      versionEvidence: confirmedEvidence,
+      checkedAt,
+      diagnostics,
+    });
+    return this.compatibilityReport();
+  }
+
+  private async clientCompatibility(agentName: string, original: AgentInstance, generatedAt: string): Promise<ClientCompatibilityReport> {
+    const instance = original.discovery === 'demo'
+      ? await this.clearDemoVersionObservation(original, generatedAt)
+      : isAgentId(original.agentId) ? await this.refreshExecutableObservation(original, generatedAt) : original;
+    const configurationState = await directoryExists(instance.configRoot) ? 'present' : 'missing';
+    const candidate = instance.discovery === 'demo' || !isAgentId(instance.agentId) || !instance.executable ? null : await inspectExecutable(instance.executable, generatedAt);
+    const versionEvidence = isAgentId(instance.agentId) && validVersionEvidence(instance.versionEvidence, instance.agentId)
+      && sameExecutable(instance.versionEvidence.executable, candidate) ? instance.versionEvidence : null;
+    const status = instance.discovery === 'demo' ? 'demo'
+      : versionEvidence ? 'verified-client'
+        : candidate ? 'executable-unverified'
+          : configurationState === 'present' ? 'configuration-only' : 'not-found';
+    const diagnostics = [
+      ...instance.diagnostics,
+      ...(status === 'verified-client' ? ['The exact CLI version output signature was recognized; this does not verify publisher identity, desktop-app installation, or resource runtime state.'] : []),
+      ...(status === 'executable-unverified' ? ['A PATH executable candidate exists, but its CLI version output has not been recognized. This does not prove an official installation.'] : []),
+      ...(status === 'configuration-only' ? ['The configuration root is a directory, but no PATH executable candidate was found.'] : []),
+    ];
+    if (instance.versionEvidence && !versionEvidence) {
+      const latest = this.store.getInstance(instance.id) ?? instance;
+      if (sameVersionEvidence(latest.versionEvidence, instance.versionEvidence)) {
+        this.store.putInstance({ ...latest, version: null, versionEvidence: null });
+      }
+    }
+    const refreshed = this.store.getInstance(instance.id) ?? instance;
+    const refreshedEvidence = isAgentId(refreshed.agentId) && validVersionEvidence(refreshed.versionEvidence, refreshed.agentId)
+      && sameExecutable(refreshed.versionEvidence.executable, candidate) ? refreshed.versionEvidence : null;
+    return {
+    id: stableId('compatibility', `${refreshed.agentId}\0${refreshed.id}`),
+      agentId: refreshed.agentId as AgentId, agentName, instanceId: refreshed.id, instanceName: refreshed.name,
+      configRoot: refreshed.configRoot, status: refreshed.discovery === 'demo' ? 'demo' : refreshedEvidence ? 'verified-client'
+        : candidate ? 'executable-unverified' : configurationState === 'present' ? 'configuration-only' : 'not-found',
+      configurationState, executableCandidate: candidate,
+      versionEvidence: refreshedEvidence, checkedAt: refreshedEvidence?.checkedAt ?? refreshed.checkedAt ?? null,
+      capabilities: isAgentId(refreshed.agentId) ? buildCapabilityEvidence({
+        agentId: refreshed.agentId, versionEvidence: refreshedEvidence,
+        optedInCodexWrite: refreshed.agentId === 'codex' && refreshed.discovery === 'manual' && refreshed.writable,
+      }) : [],
+      diagnostics: [...new Set(diagnostics)],
+    };
+  }
+
+  private async refreshExecutableObservation(original: AgentInstance, checkedAt: string): Promise<AgentInstance> {
+    if (!isAgentId(original.agentId)) return original;
+    const agentId = original.agentId;
+    let candidate: ExecutableIdentity | null = null;
+    try {
+      const executable = await this.executableResolver(agentId, this.env);
+      candidate = executable ? await inspectExecutable(executable, checkedAt) : null;
+    } catch { /* resolver failure invalidates any previously stored candidate observation */ }
+    const latest = this.store.getInstance(original.id) ?? original;
+    if (latest.agentId !== original.agentId || latest.discovery === 'demo') return latest;
+    const oldEvidence = validVersionEvidence(latest.versionEvidence, agentId) ? latest.versionEvidence : null;
+    const retainedEvidence = oldEvidence && sameExecutable(oldEvidence.executable, candidate) ? oldEvidence : null;
+    const candidatePath = candidate?.path ?? null;
+    const evidenceWasCleared = latest.versionEvidence !== undefined && latest.versionEvidence !== null && retainedEvidence === null;
+    const legacyVersionWasCleared = latest.version !== null && retainedEvidence === null;
+    const changed = latest.executable !== candidatePath || evidenceWasCleared || legacyVersionWasCleared
+      || (retainedEvidence && latest.version !== retainedEvidence.version);
+    if (!changed) return latest;
+    const refreshed: AgentInstance = {
+      ...latest,
+      executable: candidatePath,
+      version: retainedEvidence?.version ?? null,
+      versionEvidence: retainedEvidence,
+      checkedAt,
+      diagnostics: latest.diagnostics.filter(item => !item.startsWith('Version check:')),
+    };
+    this.store.putInstance(refreshed);
+    return refreshed;
+  }
+
+  private async clearDemoVersionObservation(original: AgentInstance, checkedAt: string): Promise<AgentInstance> {
+    if (original.executable === null && original.version === null && !original.versionEvidence) return original;
+    const cleared: AgentInstance = { ...original, executable: null, version: null, versionEvidence: null, checkedAt };
+    this.store.putInstance(cleared);
+    return cleared;
+  }
+
+  private async currentExecutable(agentId: AgentId, checkedAt: string): Promise<ExecutableIdentity | null> {
+    try {
+      const candidate = await this.executableResolver(agentId, this.env);
+      return candidate ? inspectExecutable(candidate, checkedAt) : null;
+    } catch { return null; }
+  }
+
+  private defaultConfigRoot(agentId: AgentId): string {
+    switch (agentId) {
+      case 'codex': return path.resolve(this.env.CODEX_HOME || path.join(this.homeDir, '.codex'));
+      case 'claude-code': return path.resolve(this.env.CLAUDE_CONFIG_DIR || path.join(this.homeDir, '.claude'));
+      case 'zcode': return path.resolve(this.env.ZCODE_HOME || path.join(this.homeDir, '.zcode'));
+      case 'deepseek-harness': return path.resolve(this.env.DSH_HOME || path.join(this.homeDir, '.dsh'));
+    }
+  }
+
+  private async createIsolatedVersionEnvironment(agentId: AgentId, instanceId: string): Promise<{ directory: string; cwd: string; env: NodeJS.ProcessEnv }> {
+    await mkdir(this.isolationRoot, { recursive: true });
+    const directory = await mkdtemp(path.join(this.isolationRoot, `version-check-${stableId('instance', `${agentId}\0${instanceId}`)}-`));
+    const home = path.join(directory, 'home');
+    const cwd = path.join(directory, 'cwd');
+    const appData = path.join(directory, 'appdata');
+    const localAppData = path.join(directory, 'local-appdata');
+    const configRoot = path.join(directory, 'client-config');
+    const codexConfigRoot = path.join(configRoot, 'codex');
+    const claudeConfigRoot = path.join(configRoot, 'claude');
+    const zcodeConfigRoot = path.join(configRoot, 'zcode');
+    const dshConfigRoot = path.join(configRoot, 'deepseek-harness');
+    await Promise.all([home, cwd, appData, localAppData, codexConfigRoot, claudeConfigRoot, zcodeConfigRoot, dshConfigRoot].map(item => mkdir(item, { recursive: true })));
+    const env: NodeJS.ProcessEnv = {
+      PATH: this.env.PATH ?? this.env.Path ?? '',
+      HOME: home,
+      USERPROFILE: home,
+      HOMEDRIVE: path.parse(home).root.replace(/[\\/]$/, ''),
+      HOMEPATH: `\\${home.slice(path.parse(home).root.length).replace(/^[\\/]+/, '')}`,
+      APPDATA: appData,
+      LOCALAPPDATA: localAppData,
+      XDG_CONFIG_HOME: configRoot,
+      CODEX_HOME: codexConfigRoot,
+      CLAUDE_CONFIG_DIR: claudeConfigRoot,
+      ZCODE_HOME: zcodeConfigRoot,
+      DSH_HOME: dshConfigRoot,
+      TMP: directory,
+      TEMP: directory,
+      CI: '1',
+      NO_COLOR: '1',
+      TERM: 'dumb',
+    };
+    for (const key of ['SystemRoot', 'WINDIR', 'COMSPEC', 'PATHEXT']) {
+      const value = this.env[key];
+      if (value !== undefined) env[key] = value;
+    }
+    return { directory, cwd, env };
+  }
 
   registerInstance(input: RegisterInstanceInput): AgentInstance {
     const adapter = this.adapter(input.agentId);
@@ -61,8 +306,9 @@ export class ManagerService {
       agentId: input.agentId,
       name: input.name?.trim() || existing?.name || `${adapter.name} (manual)`,
       configRoot,
-      version: existing?.version ?? null,
+      version: existing?.versionEvidence?.version ?? null,
       executable: existing?.executable ?? null,
+      ...(existing?.versionEvidence ? { versionEvidence: existing.versionEvidence } : { versionEvidence: null }),
       discovery,
       // Writing is intentionally limited to explicit user registration of a Codex root.
       writable: input.writable === true && input.agentId === 'codex',
@@ -87,28 +333,47 @@ export class ManagerService {
     if (input.discover) {
       const discoveryContext = input.discoveryContext ?? { homeDir: this.homeDir, env: this.env };
       const discovered = await Promise.allSettled(this.adapters.map(adapter => adapter.discover(discoveryContext)));
+      const previousInstances = this.store.catalog().instances;
       for (let index = 0; index < discovered.length; index += 1) {
         const result = discovered[index];
         const adapter = this.adapters[index];
         if (!result || !adapter || result.status !== 'fulfilled') continue;
+        const seenIds = new Set<string>();
         for (const found of result.value) {
           const configRoot = path.resolve(found.configRoot);
-          const existing = this.store.catalog().instances.find(instance =>
+          const existing = previousInstances.find(instance =>
             instance.agentId === adapter.id && canonical(instance.configRoot) === canonical(configRoot),
           );
+          const id = existing?.id ?? found.id;
+          seenIds.add(id);
+          const executable = found.executable ? await inspectExecutable(found.executable, this.now().toISOString()) : null;
+          const oldEvidence = existing && validVersionEvidence(existing.versionEvidence, adapter.id as AgentId)
+            && sameExecutable(existing.versionEvidence.executable, executable) ? existing.versionEvidence : null;
+          const diagnostics = [...new Set([...(existing?.diagnostics ?? []), ...found.diagnostics])]
+            .filter(item => oldEvidence || !item.startsWith('Version check:'));
           if (existing?.discovery === 'manual') {
-            // Discovery may refresh observations, but it must never revoke an explicit opt-in.
+            // Rediscovery refreshes identity but never revokes a deliberate write opt-in.
             this.store.putInstance({
-              ...existing,
-              version: found.version ?? existing.version,
-              executable: found.executable ?? existing.executable,
-              checkedAt: this.now().toISOString(),
-              diagnostics: [...new Set([...existing.diagnostics, ...found.diagnostics])],
+              ...existing, version: oldEvidence?.version ?? null, versionEvidence: oldEvidence,
+              executable: executable?.path ?? null, checkedAt: this.now().toISOString(), diagnostics,
             });
             continue;
           }
-          const instance = { ...found, id: existing?.id ?? found.id, configRoot: existing?.configRoot ?? configRoot, agentId: adapter.id, discovery: 'auto' as const, writable: false };
-          this.store.putInstance(instance);
+          this.store.putInstance({
+            ...found,
+            id,
+            configRoot: existing?.configRoot ?? configRoot,
+            agentId: adapter.id,
+            discovery: 'auto',
+            writable: false,
+            executable: executable?.path ?? null,
+            version: oldEvidence?.version ?? null,
+            versionEvidence: oldEvidence,
+            diagnostics,
+          });
+        }
+        for (const old of previousInstances.filter(item => item.agentId === adapter.id && !seenIds.has(item.id))) {
+          await this.refreshExecutableObservation(old, this.now().toISOString());
         }
       }
     }
@@ -204,9 +469,41 @@ export class ManagerError extends Error {
   constructor(readonly statusCode: number, readonly code: string, message: string) { super(message); }
 }
 
+async function directoryExists(directory: string): Promise<boolean> {
+  try { return (await stat(directory)).isDirectory(); } catch { return false; }
+}
+
+function isAgentId(value: string): value is AgentId {
+  return value === 'codex' || value === 'claude-code' || value === 'zcode' || value === 'deepseek-harness';
+}
+
+function validVersionEvidence(value: unknown, agentId: AgentId): value is ClientVersionEvidence {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const candidate = value as Partial<ClientVersionEvidence>;
+  const expectedSignature = agentId === 'codex' ? 'codex-cli-version' : agentId === 'claude-code' ? 'claude-code-version' : null;
+  return expectedSignature !== null
+    && candidate.signature === expectedSignature
+    && typeof candidate.version === 'string'
+    && /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(candidate.version)
+    && typeof candidate.platform === 'string'
+    && typeof candidate.checkedAt === 'string'
+    && Boolean(candidate.executable && typeof candidate.executable.path === 'string'
+      && typeof candidate.executable.realPath === 'string'
+      && typeof candidate.executable.fileIdentity === 'string'
+      && typeof candidate.executable.checkedAt === 'string');
+}
+
+function sameVersionEvidence(left: ClientVersionEvidence | null | undefined, right: ClientVersionEvidence | null | undefined): boolean {
+  return Boolean(left && right && left.version === right.version && left.signature === right.signature
+    && left.platform === right.platform && left.checkedAt === right.checkedAt
+    && sameExecutable(left.executable, right.executable));
+}
+
 export function stableId(kind: string, value: string): string {
   return `${kind}_${createHash('sha256').update(value).digest('hex').slice(0, 24)}`;
 }
+export { inspectExecutable, parseRecognizedVersion, resolvePathExecutable, runVersionCommand, sameExecutable } from './version-check.js';
+export type { ExecutableResolver, VersionCheckRunner, VersionRunnerInput, VersionRunnerOutput } from './version-check.js';
 export function canonical(inputPath: string): string { return path.resolve(inputPath).replace(/\\/g, '/').toLocaleLowerCase('en-US'); }
 function isInside(candidate: string, parent: string): boolean {
   const relative = path.relative(path.resolve(parent), path.resolve(candidate));

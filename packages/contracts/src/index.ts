@@ -8,6 +8,64 @@ export type SourceKind = 'user' | 'repository' | 'plugin' | 'builtin' | 'organiz
 export type CompatibilityClass = 'portable' | 'agent-specific' | 'conditional' | 'unknown';
 export type RuntimeState = 'unknown' | 'pending' | 'active' | 'inactive';
 export type DiscoveryKind = 'auto' | 'manual' | 'demo';
+export type ClientCompatibilityStatus = 'verified-client' | 'executable-unverified' | 'configuration-only' | 'not-found' | 'demo';
+export type CapabilityEvidenceArea = 'static-scan' | 'fixture-validation' | 'native-config' | 'runtime';
+export type CapabilityEvidenceStatus = 'verified' | 'partial' | 'unverified' | 'unsupported';
+export type CapabilityControlScope = 'standalone-user-mcp' | 'user-config-skill' | 'local-marketplace-plugin';
+
+export interface ExecutableIdentity {
+  path: string;
+  realPath: string;
+  fileIdentity: string;
+  checkedAt: string;
+}
+
+/** Persisted only after an exact CLI-specific version output signature is recognized. */
+export interface ClientVersionEvidence {
+  version: string;
+  signature: 'codex-cli-version' | 'claude-code-version';
+  executable: ExecutableIdentity;
+  platform: string;
+  checkedAt: string;
+}
+
+export interface CapabilityEvidence {
+  area: CapabilityEvidenceArea;
+  resourceKind: ResourceKind | null;
+  scope: SkillScope | null;
+  sourceKind?: SourceKind | null;
+  controlScope?: CapabilityControlScope;
+  mcpTransport?: 'stdio' | 'http' | 'unknown';
+  operations?: Array<'scan' | 'toggle' | 'restore' | 'runtime-observation'>;
+  status: CapabilityEvidenceStatus;
+  readable: boolean;
+  writable: boolean;
+  reason: string;
+  evidenceReference?: string;
+  clientVersion?: string;
+  platform?: string;
+}
+
+export interface ClientCompatibilityReport {
+  id: string;
+  agentId: string;
+  agentName: string;
+  instanceId: string | null;
+  instanceName: string | null;
+  configRoot: string | null;
+  status: ClientCompatibilityStatus;
+  configurationState: 'present' | 'missing';
+  executableCandidate: ExecutableIdentity | null;
+  versionEvidence: ClientVersionEvidence | null;
+  capabilities: CapabilityEvidence[];
+  checkedAt: string | null;
+  diagnostics: string[];
+}
+
+export interface CompatibilityReport {
+  generatedAt: string;
+  clients: ClientCompatibilityReport[];
+}
 
 export interface AgentInstance {
   id: string;
@@ -20,6 +78,8 @@ export interface AgentInstance {
   writable: boolean;
   checkedAt: string;
   diagnostics: string[];
+  /** Optional for compatibility with older persisted instance JSON. */
+  versionEvidence?: ClientVersionEvidence | null;
 }
 
 export interface Project { id: string; name: string; rootPath: string }
@@ -53,6 +113,8 @@ export interface Binding {
   configurationKey?: string;
   configurationEnabled?: boolean | null;
   cacheState?: 'present' | 'missing' | 'unknown';
+  mcpTransport?: 'stdio' | 'http' | 'unknown';
+  controlScope?: CapabilityControlScope;
 }
 
 export interface Catalog {
@@ -129,6 +191,7 @@ export const ScanRequestSchema = z.object({
   instanceId: z.string().optional(),
   projectId: z.string().optional(),
 });
+export const VersionCheckRequestSchema = z.object({}).strict();
 export const CreatePlanSchema = z.object({ bindingId: z.string().min(1), enabled: z.boolean() });
 export const ApplyPlanSchema = z.object({ digest: z.string().min(1) });
 export const BootstrapSchema = z.object({ ticket: z.string().min(1) });

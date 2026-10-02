@@ -129,6 +129,9 @@ importers:
 
   packages/adapters:
     dependencies:
+      '@agentdeck/change-engine':
+        specifier: workspace:*
+        version: link:../change-engine
       '@agentdeck/contracts':
         specifier: workspace:*
         version: link:../contracts

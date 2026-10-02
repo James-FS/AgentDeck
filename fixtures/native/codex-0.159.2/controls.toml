@@ -1,0 +1,12 @@
+# Codex CLI 0.159.2 / Windows native control shapes.
+# Generated from isolated synthetic Skill/plugin fixtures; paths replaced with a synthetic root.
+[plugins."probe@local"]
+enabled = false
+
+[marketplaces.local]
+source_type = "local"
+source = '\\?\C:\AgentDeckFixture\market'
+
+[[skills.config]]
+path = 'C:\AgentDeckFixture\home\.codex\skills\probe-skill\SKILL.md'
+enabled = false

@@ -9,7 +9,9 @@ export type {
   PreparedChange,
   PreparedChangePrivate,
   PrepareToggleInput,
+  CodexToggleTarget,
   RecoveryItem,
   RecoveryReport,
 } from './types.js';
 export { serializePreparedChange, deserializePreparedChange } from './serialization.js';
+export { editCodexEnabled } from './toml-edit.js';

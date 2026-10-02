@@ -4,7 +4,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { lstat, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import type { Catalog } from '../../packages/contracts/src/index';
+import type { Catalog, CompatibilityReport } from '../../packages/contracts/src/index';
 import { createTestDirectory, removeTestDirectory } from '../helpers';
 
 test('verifies installed client sources through the built UI without modifying them', async ({ page }) => {
@@ -71,6 +71,21 @@ test('verifies installed client sources through the built UI without modifying t
     expect(catalog.bindings.every(item => !item.writable && item.runtime === 'unknown')).toBe(true);
     expect(catalog.bindings.every(item => ['configuration', 'cache', 'filesystem'].includes(item.origin ?? ''))).toBe(true);
     expect(new Set(catalog.bindings.map(item => item.id)).size).toBe(catalog.bindings.length);
+    const session = await page.request.get(new URL('/api/v1/session', startupUrl).href);
+    const { csrfToken } = await session.json() as { csrfToken: string };
+    const versionObservations: Record<string, string> = {};
+    for (const instance of catalog.instances.filter(item => ['codex', 'claude-code'].includes(item.agentId) && item.executable)) {
+      const checked = await page.request.post(new URL(`/api/v1/instances/${instance.id}/version-check`, startupUrl).href, {
+        data: {}, headers: { Origin: new URL(startupUrl).origin, 'X-CSRF-Token': csrfToken },
+      });
+      expect(checked.ok()).toBe(true);
+      const report = await checked.json() as CompatibilityReport;
+      const client = report.clients.find(item => item.instanceId === instance.id)!;
+      expect(client.status).toBe('verified-client');
+      expect(client.versionEvidence?.version).toMatch(/^\d+\.\d+\.\d+/);
+      expect(client.capabilities.every(item => !item.writable)).toBe(true);
+      versionObservations[instance.agentId] = client.versionEvidence!.version;
+    }
     const expectedSkills = Object.keys(before).filter(file => file.includes(`${path.sep}plugins${path.sep}cache${path.sep}`) && path.basename(file) === 'SKILL.md');
     const expectedPlugins = Object.keys(before).filter(file => file.endsWith(path.join('.codex-plugin', 'plugin.json')));
     for (const file of expectedSkills) expect(catalog.bindings.some(item => item.kind === 'skill' && item.sourcePath === path.dirname(file)), file).toBe(true);
@@ -90,6 +105,12 @@ test('verifies installed client sources through the built UI without modifying t
       }
     }
     await mkdir('work/browser-proof', { recursive: true });
+    await page.reload();
+    await expect(page.getByRole('heading', { name: '资源管理', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: /^Agent 实例/ }).click();
+    for (const version of Object.values(versionObservations)) await expect(page.getByText(version, { exact: false }).first()).toBeVisible();
+    await page.screenshot({ path: 'work/browser-proof/real-compatibility-matrix.png', fullPage: true });
+    await page.getByRole('button', { name: '资源管理', exact: true }).click();
     await page.screenshot({ path: 'work/browser-proof/real-resources.png', fullPage: true });
     if (catalog.bindings.some(item => item.name === 'sites-building' && item.parentId)) {
       await page.getByRole('button', { name: 'Skill', exact: true }).click();
@@ -108,7 +129,7 @@ test('verifies installed client sources through the built UI without modifying t
     expect(after).toEqual(before);
     const counts = Object.fromEntries(['skill', 'plugin', 'mcp'].map(kind => [kind, catalog.bindings.filter(item => item.kind === kind).length]));
     await mkdir('work/scan-proof', { recursive: true });
-    await writeFile('work/scan-proof/real-client-proof.json', JSON.stringify({ verifiedAt: new Date().toISOString(), expectedCacheSkills: expectedSkills.length, expectedCachePlugins: expectedPlugins.length, scannedSourceFiles: Object.keys(before).length, sourcesUnchanged: true, counts, instances: catalog.instances.map(({ agentId, executable, version }) => ({ agentId, executable, version })), bindings: catalog.bindings, digests: before }, null, 2));
+    await writeFile('work/scan-proof/real-client-proof.json', JSON.stringify({ verifiedAt: new Date().toISOString(), expectedCacheSkills: expectedSkills.length, expectedCachePlugins: expectedPlugins.length, scannedSourceFiles: Object.keys(before).length, sourcesUnchanged: true, counts, versionObservations, instances: catalog.instances.map(({ agentId, executable, version }) => ({ agentId, executable, version })), bindings: catalog.bindings, digests: before }, null, 2));
     console.log(JSON.stringify({ expectedCacheSkills: expectedSkills.length, expectedCachePlugins: expectedPlugins.length, scannedSourceFiles: Object.keys(before).length, counts, sourcesUnchanged: true }));
   } finally {
     if (server && server.exitCode === null) {

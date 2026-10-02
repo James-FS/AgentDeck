@@ -141,6 +141,16 @@ export function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
+  export function mcpTransport(value: unknown): NonNullable<Binding['mcpTransport']> {
+  const server = object(value);
+  const hasCommand = typeof server?.command === 'string';
+  const hasUrl = typeof server?.url === 'string';
+  if (hasCommand && hasUrl) return 'unknown';
+    if (hasCommand) return server?.type === undefined || server.type === 'stdio' ? 'stdio' : 'unknown';
+    if (hasUrl) return server?.type === undefined || server.type === 'http' || server.type === 'sse' ? 'http' : 'unknown';
+  return 'unknown';
+}
+
 export function safeDescription(kind: ResourceKind, noun: string): string {
   if (kind === 'skill') return 'Skill discovered from a bounded local directory scan.';
   if (kind === 'plugin') return 'Plugin metadata discovered from local configuration.';
@@ -171,6 +181,7 @@ export function baseBinding(args: {
   configurationKey?: string;
   configurationEnabled?: boolean | null;
   cacheState?: Binding['cacheState'];
+  mcpTransport?: Binding['mcpTransport'];
 }): Binding {
   const sourcePath = normalizePath(args.sourcePath);
   const projectId = args.projectId === undefined ? (args.context.project?.id ?? null) : args.projectId;
@@ -203,6 +214,7 @@ export function baseBinding(args: {
     ...(args.configurationKey === undefined ? {} : { configurationKey: args.configurationKey }),
     ...(args.configurationEnabled === undefined ? {} : { configurationEnabled: args.configurationEnabled }),
     ...(args.cacheState === undefined ? {} : { cacheState: args.cacheState }),
+    ...(args.mcpTransport === undefined ? {} : { mcpTransport: args.mcpTransport }),
   };
 }
 

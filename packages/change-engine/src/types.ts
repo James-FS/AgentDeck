@@ -40,7 +40,10 @@ export interface PreparedChangePrivate {
   pathIdentity: PathIdentity;
   beforeEnabled: boolean | null;
   desiredEnabled: boolean | null;
+  target?: CodexToggleTarget;
 }
+
+export type CodexToggleTarget = { kind: 'skill'; path: string } | { kind: 'plugin'; id: string };
 
 export interface PreparedChange {
   plan: ChangePlan;
@@ -72,6 +75,7 @@ export interface PrepareToggleInput {
   enabled: boolean;
   now?: Date;
   ttlMs?: number;
+  target?: CodexToggleTarget;
 }
 
 export interface EngineOptions { dataDir: string; now?: Date }

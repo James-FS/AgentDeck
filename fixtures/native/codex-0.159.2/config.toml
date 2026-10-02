@@ -1,0 +1,6 @@
+[mcp_servers.agentdeck-native-probe]
+command = "node"
+args = ["agentdeck-never-start.cjs"]
+
+[mcp_servers.agentdeck-native-probe.env]
+AGENTDECK_FAKE_TOKEN = "AGENTDECK_SECRET_SENTINEL"

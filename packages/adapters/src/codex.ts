@@ -1,9 +1,10 @@
 import TOML from '@iarna/toml';
+import { editCodexEnabled, type CodexToggleTarget } from '@agentdeck/change-engine';
 import type { AgentAdapter, AgentInstance, Binding, ScanContext, ScanReport } from '@agentdeck/contracts';
 import path from 'node:path';
 import {
   baseBinding, declaredPath, directDirectories, expandPath, existsDirectory, existsRegularFile, findExecutable,
-  instance, isSafePathWithin, object, report, safeMcpFile, safeTomlFile, scanSingleSkill, scanSkillRoot,
+  instance, isSafePathWithin, mcpTransport, object, report, safeMcpFile, safeTomlFile, scanSingleSkill, scanSkillRoot,
 } from './shared.js';
 
 const discoveredHomes = new Map<string, string>();
@@ -225,6 +226,7 @@ async function scanCodexPluginCache(args: {
               sourcePath: mcpSource, projectId: null, nativeKey: `cache:${marketplace}/${directoryName}/${version}.mcpServers.${serverName}`,
               parentId: parent.id, enabled: state.enabled, origin: 'cache', pluginId: identity, pluginVersion: version, marketplace,
               ...(config ? { configurationSourcePath: config.sourcePath, configurationKey: config.key, configurationEnabled: config.enabled } : { configurationEnabled: null }),
+              mcpTransport: mcpTransport(rawServer),
               cacheState: 'present',
               diagnostics: state.diagnostics,
               readOnlyReason: 'MCP servers bundled with a cached plugin cannot be changed independently.',
@@ -244,7 +246,7 @@ export const codexAdapter: AgentAdapter = {
   info: {
     id: 'codex', name: 'Codex', description: 'Read-only local discovery and bounded configuration scanning for Codex.',
     supportedKinds: ['skill', 'plugin', 'mcp'],
-    writeSupport: ['experimental: manually registered writable instance, independent mcp_servers entries in config.toml only'],
+    writeSupport: ['experimental: manually registered writable instance, independent user MCP', 'Codex 0.159.2/win32: user config-root Skill overrides and configured local marketplace plugin toggles'],
   },
   async discover({ homeDir, env }): Promise<AgentInstance[]> {
     const root = expandPath(env.CODEX_HOME || path.join(homeDir, '.codex'), homeDir);
@@ -279,6 +281,7 @@ export const codexAdapter: AgentAdapter = {
         for (const [serverName, raw] of Object.entries(standalone)) {
           const server = object(raw);
           const state = server && server.enabled === undefined ? true : typeof server?.enabled === 'boolean' ? server.enabled : null;
+          const transport = mcpTransport(server);
           const tableCount = parsed.text ? countCodexServerTables(parsed.text, serverName) : 0;
           const enabledFieldIsSupported = !server || server.enabled === undefined || typeof server.enabled === 'boolean';
           const supported = tableCount === 1 && server !== null && enabledFieldIsSupported;
@@ -287,12 +290,14 @@ export const codexAdapter: AgentAdapter = {
           if (server?.enabled === undefined) reasons.push('Codex treats a missing enabled field as enabled by default.');
           else if (server && typeof server.enabled !== 'boolean') reasons.push('The enabled field is not a TOML boolean.');
           if (tableCount !== 1) reasons.push('The target table is duplicated or its syntax cannot be located safely.');
-          if (writableInstance && supported) reasons.push('Experimental: this Codex version has not been validated on a real installation.');
+          if (transport !== 'stdio') reasons.push('Native write evidence applies only to standalone stdio MCP entries.');
+          if (writableInstance && supported) reasons.push('Experimental write opt-in applies to structurally supported standalone user MCP, including HTTP and unknown transports. Native evidence remains limited to the verified STDIO scope; client runtime remains unobserved.');
           bindings.push(baseBinding({
             context, kind: 'mcp', name: serverName, scope: 'native', sourceKind: 'user',
             sourcePath: configPath, projectId: null, nativeKey: `mcp_servers.${serverName}`, enabled: state,
             origin: 'configuration', configurationSourcePath: configPath, configurationKey: `mcp_servers.${serverName}`,
             configurationEnabled: state,
+            mcpTransport: transport,
             writable,
             readOnlyReason: writable ? null : !writableInstance
               ? 'Writing requires a manually registered writable instance or an isolated writable demo instance.'
@@ -357,6 +362,7 @@ export const codexAdapter: AgentAdapter = {
                 sourcePath: projectConfigPath, projectId: project.id, nativeKey: `mcp_servers.${serverName}`, enabled,
                 origin: 'configuration', configurationSourcePath: projectConfigPath,
                 configurationKey: `mcp_servers.${serverName}`, configurationEnabled: enabled,
+                mcpTransport: mcpTransport(server),
                 diagnostics: notes, readOnlyReason: 'Project Codex MCP configuration is read-only in this iteration.',
               }));
             }
@@ -387,6 +393,45 @@ export const codexAdapter: AgentAdapter = {
         projectId: null, origin: 'filesystem',
       }) : [];
       bindings.push(...bundledSkills);
+    }
+    for (const binding of bindings) {
+      if (binding.parentId !== null || binding.projectId !== null) continue;
+      let target: CodexToggleTarget | undefined;
+      if (binding.kind === 'skill' && binding.scope === 'user-global' && binding.sourceKind === 'user') {
+        const manifest = path.join(binding.sourcePath, 'SKILL.md');
+        if (await existsRegularFile(manifest) && await isSafePathWithin(agent.configRoot, manifest)) {
+          target = { kind: 'skill', path: manifest };
+          binding.controlScope = 'user-config-skill';
+        } else binding.readOnlyReason = '初期仅验证配置根 skills 内的独立 SKILL.md；共享目录、项目和内置 Skill 保持只读。';
+      }
+      if (binding.kind === 'plugin' && binding.origin === 'cache' && binding.pluginId && binding.configurationSourcePath === configPath) {
+        const parts = pluginIdentityParts(binding.pluginId);
+        const market = parts ? object(object(config?.marketplaces)?.[parts.marketplace]) : null;
+        if (market?.source_type === 'local' && typeof market.source === 'string' && path.isAbsolute(market.source) && typeof pluginConfigurations.get(binding.pluginId)?.enabled === 'boolean') {
+          target = { kind: 'plugin', id: binding.pluginId };
+          binding.controlScope = 'local-marketplace-plugin';
+        } else binding.readOnlyReason = '初期仅验证已配置的本地市场插件整体开关；远程市场、未登记缓存和未知状态保持只读。';
+      }
+      if (!target) continue;
+      binding.configurationSourcePath = configPath;
+      binding.configurationKey = target.kind === 'skill' ? `skills.config[path=${JSON.stringify(target.path)}]` : `plugins[${JSON.stringify(target.id)}]`;
+      let structurallySupported = false;
+      try {
+        if (parsed.text === null) throw new Error('missing-config');
+        const check = editCodexEnabled(parsed.text, binding.name, binding.enabled ?? true, target);
+        binding.enabled = check.previousEnabled;
+        binding.configurationEnabled = check.previousEnabled;
+        structurallySupported = true;
+      } catch { binding.enabled = null; binding.configurationEnabled = null; }
+      const verifiedVersion = agent.versionEvidence?.signature === 'codex-cli-version' && agent.versionEvidence.version === '0.159.2' && agent.versionEvidence.platform === 'win32';
+      binding.writable = agent.discovery === 'manual' && agent.writable && verifiedVersion && structurallySupported;
+      binding.readOnlyReason = binding.writable ? null : !structurallySupported
+        ? '配置缺失或目标覆盖不能唯一安全定位；不创建文件或改写未知结构。'
+        : !verifiedVersion ? '此开关仅验收 Codex CLI 0.159.2 / Windows；请检查版本，其他版本保持只读。'
+        : '需要手动登记并明确允许配置修改；自动发现保持只读。';
+      binding.diagnostics.push(target.kind === 'skill'
+        ? '仅修改该 Codex 实例的按路径覆盖；Skill 原文保持不变。配置读取状态不代表当前会话已加载，变更后重启 Codex。'
+        : '修改插件身份的整体开关，影响该身份全部缓存版本的 Skill/MCP/其他组件；不修改缓存，当前会话运行状态未知。');
     }
     return report(bindings, diagnostics);
   },
