@@ -35,6 +35,8 @@ interface RecoveryReport {
 export interface AppOptions {
   dataDir?: string;
   homeDir?: string;
+  userHomeDir?: string;
+  userDiscoveryEnv?: NodeJS.ProcessEnv;
   demoDir?: string;
   adapterRegistry?: AgentAdapter[] | { createAdapterRegistry(): AgentAdapter[] };
   adapters?: AgentAdapter[];
@@ -188,7 +190,11 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
     const input = ScanRequestSchema.safeParse(request.body ?? {});
     if (!input.success) throw new ManagerError(400, 'INVALID_REQUEST', 'Invalid scan request.');
     const catalog = await manager.scan({
-      discover: input.data.discover,
+      discover: input.data.discover || input.data.discoverUserHome,
+      ...(input.data.discoverUserHome ? { discoveryContext: {
+        homeDir: path.resolve(options.userHomeDir ?? options.homeDir ?? process.env.AGENTDECK_USER_HOME ?? process.env.USER_HOME ?? os.homedir()),
+        env: options.userDiscoveryEnv ?? options.discoveryEnv ?? process.env,
+      } } : {}),
       ...(input.data.instanceId === undefined ? {} : { instanceId: input.data.instanceId }),
       ...(input.data.projectId === undefined ? {} : { projectId: input.data.projectId }),
     });

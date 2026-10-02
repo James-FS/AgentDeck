@@ -35,6 +35,40 @@ export function isWithin(root: string, candidate: string): boolean {
   return rel === '' || (!rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel));
 }
 
+/**
+ * Confirms an existing candidate is lexically and physically below root and
+ * that none of its child path components is a symlink or Windows junction.
+ * The registered root itself is the trust anchor; descendants are not.
+ */
+export async function isSafePathWithin(root: string, candidate: string): Promise<boolean> {
+  const absoluteRoot = path.resolve(root);
+  const absoluteCandidate = path.resolve(candidate);
+  if (!isWithin(absoluteRoot, absoluteCandidate)) return false;
+  try {
+    const rootInfo = await lstat(absoluteRoot);
+    if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) return false;
+    const canonicalRoot = await realpath(absoluteRoot);
+    const relative = path.relative(absoluteRoot, absoluteCandidate);
+    let current = absoluteRoot;
+    for (const segment of relative.split(path.sep).filter(Boolean)) {
+      current = path.join(current, segment);
+      const info = await lstat(current);
+      if (info.isSymbolicLink()) return false;
+      if (current !== absoluteCandidate && !info.isDirectory()) return false;
+      const canonicalCurrent = await realpath(current);
+      if (!isWithin(canonicalRoot, canonicalCurrent)) return false;
+    }
+    return true;
+  } catch { return false; }
+}
+
+/** Resolve a manifest-declared local path without allowing absolute or parent traversal. */
+export function declaredPath(root: string, declaration: string): string | null {
+  if (!declaration || declaration.includes('\0') || path.isAbsolute(declaration) || /^[A-Za-z]:[\\/]/.test(declaration)) return null;
+  const candidate = path.resolve(root, declaration);
+  return isWithin(root, candidate) ? candidate : null;
+}
+
 export async function existsDirectory(dir: string): Promise<boolean> {
   try { return (await lstat(dir)).isDirectory(); } catch { return false; }
 }
@@ -72,19 +106,24 @@ export async function boundedText(file: string, maxBytes = MAX_CONFIG_BYTES): Pr
   return (await boundedRead(file, maxBytes)).toString('utf8').replace(/^\uFEFF/, '');
 }
 
-export async function directEntries(dir: string): Promise<string[]> {
+export async function directEntries(dir: string, diagnostics?: string[], label = 'Scan directory'): Promise<string[]> {
   try {
     const info = await lstat(dir);
-    if (!info.isDirectory()) return [];
-    const items = await readdir(dir, { withFileTypes: true });
+    if (!info.isDirectory() || info.isSymbolicLink()) return [];
+    const items = (await readdir(dir, { withFileTypes: true }))
+      .sort((left, right) => left.name.localeCompare(right.name, 'en'));
+    if (items.length > MAX_SCAN_ENTRIES) diagnostics?.push(`${label} exceeded its bounded directory-entry limit.`);
     return items.slice(0, MAX_SCAN_ENTRIES).filter((entry) => !entry.isSymbolicLink()).map((entry) => path.join(dir, entry.name));
   } catch { return []; }
 }
 
-export async function directDirectories(dir: string): Promise<string[]> {
+export async function directDirectories(dir: string, diagnostics?: string[], label?: string): Promise<string[]> {
   const items: string[] = [];
-  for (const item of await directEntries(dir)) {
-    try { if ((await lstat(item)).isDirectory()) items.push(item); } catch { /* disappearing entry */ }
+  for (const item of await directEntries(dir, diagnostics, label)) {
+    try {
+      const info = await lstat(item);
+      if (info.isDirectory() && !info.isSymbolicLink()) items.push(item);
+    } catch { /* disappearing entry */ }
   }
   return items;
 }
@@ -124,6 +163,14 @@ export function baseBinding(args: {
   diagnostics?: string[];
   identityPath?: string;
   projectId?: string | null;
+  origin?: Binding['origin'];
+  pluginId?: string;
+  pluginVersion?: string;
+  marketplace?: string;
+  configurationSourcePath?: string;
+  configurationKey?: string;
+  configurationEnabled?: boolean | null;
+  cacheState?: Binding['cacheState'];
 }): Binding {
   const sourcePath = normalizePath(args.sourcePath);
   const projectId = args.projectId === undefined ? (args.context.project?.id ?? null) : args.projectId;
@@ -148,11 +195,19 @@ export function baseBinding(args: {
     readOnlyReason: args.readOnlyReason ?? (args.writable ? null : 'This native entry is read-only in the current compatibility scope.'),
     diagnostics: args.diagnostics ?? [],
     updatedAt: new Date().toISOString(),
+    ...(args.origin === undefined ? {} : { origin: args.origin }),
+    ...(args.pluginId === undefined ? {} : { pluginId: args.pluginId }),
+    ...(args.pluginVersion === undefined ? {} : { pluginVersion: args.pluginVersion }),
+    ...(args.marketplace === undefined ? {} : { marketplace: args.marketplace }),
+    ...(args.configurationSourcePath === undefined ? {} : { configurationSourcePath: normalizePath(args.configurationSourcePath) }),
+    ...(args.configurationKey === undefined ? {} : { configurationKey: args.configurationKey }),
+    ...(args.configurationEnabled === undefined ? {} : { configurationEnabled: args.configurationEnabled }),
+    ...(args.cacheState === undefined ? {} : { cacheState: args.cacheState }),
   };
 }
 
 export function report(bindings: Binding[], diagnostics: string[]): ScanReport {
-  return { bindings, diagnostics: [...new Set(diagnostics)] };
+  return { bindings: [...new Map(bindings.map(binding => [binding.id, binding])).values()], diagnostics: [...new Set(diagnostics)] };
 }
 
 export function instance(args: {
@@ -215,14 +270,22 @@ export async function scanSkillRoot(args: {
   parentId?: string | null;
   projectId?: string | null;
   diagnostics: string[];
+  origin?: Binding['origin'];
+  pluginId?: string;
+  pluginVersion?: string;
+  marketplace?: string;
+  configurationSourcePath?: string;
+  configurationKey?: string;
+  configurationEnabled?: boolean | null;
+  cacheState?: Binding['cacheState'];
 }): Promise<Binding[]> {
   const bindings: Binding[] = [];
   if (!(await existsDirectory(args.root))) return bindings;
-  for (const dir of await directDirectories(args.root)) {
-    const name = path.basename(dir);
-    // Use non-following file checks so a skill symlink never escapes the registered root.
+  for (const info of await directDirectories(args.root, args.diagnostics, 'Skill root')) {
+    const name = path.basename(info);
+    // Use non-following file checks so a skill symlink never escapes its root.
     let manifest: string | null = null;
-    for (const candidate of [path.join(dir, 'SKILL.md'), path.join(dir, 'skill.md')]) {
+    for (const candidate of [path.join(info, 'SKILL.md'), path.join(info, 'skill.md')]) {
       if (await existsRegularFile(candidate)) { manifest = candidate; break; }
     }
     if (!manifest) continue;
@@ -237,14 +300,62 @@ export async function scanSkillRoot(args: {
       name,
       scope: args.scope,
       sourceKind: args.sourceKind,
-      sourcePath: dir,
-      nativeKey: path.resolve(dir),
-      identityPath: await canonicalPath(dir),
+      sourcePath: info,
+      nativeKey: path.resolve(info),
+      identityPath: await canonicalPath(info),
+      enabled: args.configurationEnabled ?? null,
       ...(args.parentId !== undefined ? { parentId: args.parentId } : {}),
       ...(args.projectId !== undefined ? { projectId: args.projectId } : {}),
+      ...(args.origin === undefined ? {} : { origin: args.origin }),
+      ...(args.pluginId === undefined ? {} : { pluginId: args.pluginId }),
+      ...(args.pluginVersion === undefined ? {} : { pluginVersion: args.pluginVersion }),
+      ...(args.marketplace === undefined ? {} : { marketplace: args.marketplace }),
+      ...(args.configurationSourcePath === undefined ? {} : { configurationSourcePath: args.configurationSourcePath }),
+      ...(args.configurationKey === undefined ? {} : { configurationKey: args.configurationKey }),
+      ...(args.configurationEnabled === undefined ? {} : { configurationEnabled: args.configurationEnabled }),
+      ...(args.cacheState === undefined ? {} : { cacheState: args.cacheState }),
       description: safeDescription('skill', name),
       readOnlyReason: args.parentId ? 'This Skill is bundled with its parent plugin.' : 'Skill toggles are not validated for this client; the discovered files are read-only.',
     }));
   }
   return bindings;
+}
+
+export async function scanSingleSkill(args: {
+  directory: string;
+  context: ScanContext;
+  parentId: string;
+  pluginId?: string;
+  pluginVersion?: string;
+  marketplace?: string;
+  configurationSourcePath?: string;
+  configurationKey?: string;
+  configurationEnabled?: boolean | null;
+  origin?: Binding['origin'];
+  cacheState?: Binding['cacheState'];
+  diagnostics: string[];
+}): Promise<Binding[]> {
+  for (const filename of ['SKILL.md', 'skill.md']) {
+    const manifest = path.join(args.directory, filename);
+    if (!(await existsRegularFile(manifest))) continue;
+    try { await boundedRead(manifest, MAX_SKILL_BYTES); }
+    catch {
+      args.diagnostics.push('A plugin-declared Skill has an unreadable or oversized manifest and was skipped.');
+      return [];
+    }
+    return [baseBinding({
+      context: args.context, kind: 'skill', name: path.basename(args.directory), scope: 'native',
+      sourceKind: 'plugin', sourcePath: args.directory, nativeKey: path.resolve(args.directory),
+      identityPath: await canonicalPath(args.directory), parentId: args.parentId, projectId: null,
+      origin: args.origin ?? 'cache', ...(args.pluginId === undefined ? {} : { pluginId: args.pluginId }),
+      ...(args.pluginVersion === undefined ? {} : { pluginVersion: args.pluginVersion }),
+      ...(args.marketplace === undefined ? {} : { marketplace: args.marketplace }),
+      ...(args.configurationSourcePath === undefined ? {} : { configurationSourcePath: args.configurationSourcePath }),
+      ...(args.configurationKey === undefined ? {} : { configurationKey: args.configurationKey }),
+      ...(args.configurationEnabled === undefined ? {} : { configurationEnabled: args.configurationEnabled }),
+      cacheState: args.cacheState ?? (args.origin === 'filesystem' ? 'unknown' : 'present'), enabled: args.configurationEnabled ?? null,
+      readOnlyReason: 'This Skill is bundled with a cached plugin and cannot be changed independently.',
+    })];
+  }
+  return [];
 }

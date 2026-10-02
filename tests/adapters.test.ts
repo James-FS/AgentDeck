@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { writeFile } from 'node:fs/promises';
+import { mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createAdapterRegistry } from '../packages/adapters/src/index.ts';
 import type { AgentInstance, AgentAdapter } from '../packages/contracts/src/index.ts';
@@ -61,6 +61,7 @@ describe('independent adapter verification', () => {
       expect(JSON.stringify(report)).not.toContain('AGENTDECK_SECRET_SENTINEL');
       expect(report.bindings.every((binding) => binding.runtime === 'unknown'), entry.id).toBe(true);
       expect(report.bindings.every((binding) => binding.writable === false), entry.id).toBe(true);
+      expect(report.bindings.every((binding) => ['configuration', 'cache', 'filesystem'].includes(binding.origin ?? '')), entry.id).toBe(true);
     }
     expect(await fileTreeDigests(directory)).toEqual(before);
   });
@@ -79,6 +80,19 @@ describe('independent adapter verification', () => {
     const mcp = report.bindings.filter((binding) => binding.kind === 'mcp');
     expect(mcp.find((binding) => binding.name === 'docs')?.enabled).toBe(true);
     expect(mcp.find((binding) => binding.name === 'server.with-dot')?.enabled).toBe(false);
+  });
+
+  it('includes Codex system skills and excludes plugin infrastructure directories', async () => {
+    const systemSkill = path.join(home, '.codex', 'skills', '.system', 'builtin-review');
+    await mkdir(systemSkill, { recursive: true });
+    await writeFile(path.join(systemSkill, 'SKILL.md'), '---\nname: builtin-review\ndescription: Fixture builtin skill.\n---\n');
+    await mkdir(path.join(home, '.codex', 'plugins', 'cache'), { recursive: true });
+    await mkdir(path.join(home, '.codex', 'plugins', '.plugin-appserver'), { recursive: true });
+    const before = await fileTreeDigests(home);
+    const result = await adapter('codex').scan({ instance: instance('codex') });
+    expect(result.bindings.find(item => item.name === 'builtin-review')?.sourceKind).toBe('builtin');
+    expect(result.bindings.some(item => item.kind === 'plugin' && ['cache', '.plugin-appserver'].includes(item.name))).toBe(false);
+    expect(await fileTreeDigests(home)).toEqual(before);
   });
 
   it('distinguishes Claude skill availability from its user source and global scope', async () => {
@@ -109,6 +123,22 @@ describe('independent adapter verification', () => {
       && (binding.name === 'dynamic' || binding.nativeKey.includes('mcp-dynamic')));
     expect(dynamic).toBeDefined();
     expect(dynamic?.enabled).toBeNull();
+  });
+
+  it('keeps DSH project Skills and profiles inside the registered root', async () => {
+    const target = path.join(directory, 'outside-dsh');
+    await mkdir(path.join(target, 'skills', 'escaped-dsh-skill'), { recursive: true });
+    await writeFile(path.join(target, 'skills', 'escaped-dsh-skill', 'SKILL.md'), 'fixture');
+    await mkdir(path.join(target, 'profiles', 'web'), { recursive: true });
+    await writeFile(path.join(target, 'profiles', 'web', 'cordis.patch.yml'), '- id: escaped-dsh-mcp\n  name: "@deepseek-ai/dsh-mcp-client"\n  disabled: false\n  config:\n    serverName: escaped-dsh-mcp\n');
+    const link = path.join(projectRoot, '.dsh');
+    await symlink(target, link, process.platform === 'win32' ? 'junction' : 'dir');
+    try {
+      const result = await adapter('deepseek-harness').scan({ instance: instance('deepseek-harness'), project: { id: 'project-dsh', name: 'Project', rootPath: projectRoot } });
+      expect(result.bindings.some(item => item.name.startsWith('escaped-dsh-'))).toBe(false);
+    } finally {
+      await rm(link);
+    }
   });
 
   it('reports malformed TOML instead of pretending the client has an empty valid catalog', async () => {

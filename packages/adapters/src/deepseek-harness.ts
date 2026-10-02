@@ -4,7 +4,7 @@ import { isAlias, isMap, isPair, isScalar, isSeq, parseDocument } from 'yaml';
 import path from 'node:path';
 import {
   baseBinding, boundedText, directDirectories, directEntries, expandPath, existsDirectory,
-  existsRegularFile, findExecutable, instance, report, scanSkillRoot,
+  existsRegularFile, findExecutable, instance, isSafePathWithin, report, scanSkillRoot,
 } from './shared.js';
 
 interface YNode {
@@ -69,7 +69,11 @@ function stableRowKey(sourcePath: string, rawId: string | null, rowIndex: number
   return `unidentified-${digest}`;
 }
 
-async function scanProfilePatch(context: ScanContext, file: string, profile: string, projectScope: boolean, diagnostics: string[]): Promise<Binding[]> {
+async function scanProfilePatch(context: ScanContext, file: string, boundary: string, profile: string, projectScope: boolean, diagnostics: string[]): Promise<Binding[]> {
+  if (!(await isSafePathWithin(boundary, file))) {
+    diagnostics.push(`DSH profile "${profile}" crosses a symlink or junction and was skipped.`);
+    return [];
+  }
   let sourceText: string;
   try { sourceText = await boundedText(file); }
   catch {
@@ -105,6 +109,9 @@ async function scanProfilePatch(context: ScanContext, file: string, profile: str
       context, kind: 'plugin', name: packageName ?? `DSH profile row ${index + 1}`, scope, sourceKind,
       projectId, sourcePath: file, nativeKey: `profiles.${profile}.plugins.${id}`,
       enabled: state,
+      origin: 'configuration', configurationSourcePath: file,
+      configurationKey: `profiles.${profile}.plugins.${id}`, configurationEnabled: state,
+      cacheState: 'unknown',
       diagnostics: rowDiagnostics,
       readOnlyReason: 'DSH profile patch entries are read-only until the official manager semantics are validated.',
     });
@@ -121,6 +128,9 @@ async function scanProfilePatch(context: ScanContext, file: string, profile: str
       context, kind: 'mcp', name: serverName, scope, sourceKind, projectId,
       sourcePath: file, nativeKey: `profiles.${profile}.plugins.${id}.config.serverName`, parentId: parent.id,
       enabled: state,
+      origin: 'configuration', configurationSourcePath: file,
+      configurationKey: `profiles.${profile}.plugins.${id}.config.serverName`, configurationEnabled: state,
+      cacheState: 'unknown',
       diagnostics: state === null ? rowDiagnostics : [],
       readOnlyReason: 'This MCP server is a child of a DSH plugin row and cannot be changed independently.',
     }));
@@ -128,14 +138,19 @@ async function scanProfilePatch(context: ScanContext, file: string, profile: str
   return bindings;
 }
 
-async function scanProfiles(context: ScanContext, root: string, projectScope: boolean, diagnostics: string[]): Promise<Binding[]> {
+async function scanProfiles(context: ScanContext, boundary: string, root: string, projectScope: boolean, diagnostics: string[]): Promise<Binding[]> {
   const bindings: Binding[] = [];
+  if (!(await isSafePathWithin(boundary, root))) {
+    if (await existsDirectory(root)) diagnostics.push('DSH profiles cross a symlink or junction and were skipped.');
+    return bindings;
+  }
   for (const directory of await directDirectories(root)) {
+    if (!(await isSafePathWithin(boundary, directory))) continue;
     const profile = path.basename(directory);
     const files = (await directEntries(directory)).filter((file) => /\.(?:patch\.)?ya?ml$/i.test(file));
     for (const file of files.slice(0, 40)) {
-      if (!(await existsRegularFile(file))) continue;
-      bindings.push(...await scanProfilePatch(context, file, profile, projectScope, diagnostics));
+      if (!(await existsRegularFile(file)) || !(await isSafePathWithin(boundary, file))) continue;
+      bindings.push(...await scanProfilePatch(context, file, boundary, profile, projectScope, diagnostics));
     }
   }
   return bindings;
@@ -159,17 +174,28 @@ export const deepSeekHarnessAdapter: AgentAdapter = {
     const bindings: Binding[] = [];
     const diagnostics: string[] = [];
     const root = context.instance.configRoot;
-    bindings.push(...await scanSkillRoot({
-      root: path.join(root, 'skills'), context, scope: 'user-global',
-      sourceKind: 'user', projectId: null, diagnostics,
-    }));
-    bindings.push(...await scanProfiles(context, path.join(root, 'profiles'), false, diagnostics));
-    if (context.project) {
+    const globalSkillsRoot = path.join(root, 'skills');
+    if (await isSafePathWithin(root, globalSkillsRoot)) {
       bindings.push(...await scanSkillRoot({
-        root: path.join(context.project.rootPath, '.dsh', 'skills'), context, scope: 'project-directory',
-        sourceKind: 'repository', projectId: context.project.id, diagnostics,
+        root: globalSkillsRoot, context, scope: 'user-global', origin: 'filesystem',
+        sourceKind: 'user', projectId: null, diagnostics,
       }));
-      bindings.push(...await scanProfiles(context, path.join(context.project.rootPath, '.dsh', 'profiles'), true, diagnostics));
+    } else if (await existsDirectory(globalSkillsRoot)) {
+      diagnostics.push('DSH user Skills root crosses a symlink or junction and was skipped.');
+    }
+    bindings.push(...await scanProfiles(context, root, path.join(root, 'profiles'), false, diagnostics));
+    if (context.project) {
+      const projectSkillsRoot = path.join(context.project.rootPath, '.dsh', 'skills');
+      if (await isSafePathWithin(context.project.rootPath, projectSkillsRoot)) {
+        bindings.push(...await scanSkillRoot({
+          root: projectSkillsRoot, context, scope: 'project-directory', origin: 'filesystem',
+          sourceKind: 'repository', projectId: context.project.id, diagnostics,
+        }));
+      } else if (await existsDirectory(projectSkillsRoot)) {
+        diagnostics.push('DSH project Skills root crosses a symlink or junction and was skipped.');
+      }
+      const projectDshRoot = path.join(context.project.rootPath, '.dsh');
+      bindings.push(...await scanProfiles(context, context.project.rootPath, path.join(projectDshRoot, 'profiles'), true, diagnostics));
     }
     return report(bindings, diagnostics);
   },

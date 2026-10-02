@@ -91,6 +91,14 @@ function validateCatalog(value: unknown): Catalog {
     && ['unknown', 'pending', 'active', 'inactive'].includes(String(entry.runtime))
     && typeof entry.writable === 'boolean'
     && (entry.readOnlyReason === null || typeof entry.readOnlyReason === 'string')
+    && (entry.origin === undefined || ['configuration', 'cache', 'filesystem'].includes(String(entry.origin)))
+    && (entry.pluginId === undefined || typeof entry.pluginId === 'string')
+    && (entry.pluginVersion === undefined || typeof entry.pluginVersion === 'string')
+    && (entry.marketplace === undefined || typeof entry.marketplace === 'string')
+    && (entry.configurationSourcePath === undefined || typeof entry.configurationSourcePath === 'string')
+    && (entry.configurationKey === undefined || typeof entry.configurationKey === 'string')
+    && (entry.configurationEnabled === undefined || entry.configurationEnabled === null || typeof entry.configurationEnabled === 'boolean')
+    && (entry.cacheState === undefined || ['present', 'missing', 'unknown'].includes(String(entry.cacheState)))
     && Array.isArray(entry.diagnostics) && entry.diagnostics.every((item) => typeof item === 'string')
     && typeof entry.updatedAt === 'string');
   if (!validInstances || !validProjects || !validBindings) {
@@ -178,7 +186,7 @@ export const api = {
     return list as AdapterInfo[];
   },
 
-  async scan(options: { discover?: boolean; instanceId?: string; projectId?: string }): Promise<Catalog> {
+  async scan(options: { discover?: boolean; discoverUserHome?: boolean; instanceId?: string; projectId?: string }): Promise<Catalog> {
     return validateCatalog(await request<unknown>(`${API}/scans`, {
       method: 'POST',
       body: JSON.stringify(options),

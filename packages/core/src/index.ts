@@ -7,7 +7,7 @@ import type {
 
 type RegisterInstanceInput = { agentId: string; name?: string; configRoot: string; writable?: boolean };
 type RegisterProjectInput = { name?: string; rootPath: string };
-type ScanInput = { discover?: boolean; instanceId?: string; projectId?: string };
+type ScanInput = { discover?: boolean; instanceId?: string; projectId?: string; discoveryContext?: { homeDir: string; env: NodeJS.ProcessEnv } };
 
 export interface ManagerOptions {
   store: ManagerStore;
@@ -85,7 +85,8 @@ export class ManagerService {
 
   async scan(input: ScanInput = {}): Promise<Catalog> {
     if (input.discover) {
-      const discovered = await Promise.allSettled(this.adapters.map(adapter => adapter.discover({ homeDir: this.homeDir, env: this.env })));
+      const discoveryContext = input.discoveryContext ?? { homeDir: this.homeDir, env: this.env };
+      const discovered = await Promise.allSettled(this.adapters.map(adapter => adapter.discover(discoveryContext)));
       for (let index = 0; index < discovered.length; index += 1) {
         const result = discovered[index];
         const adapter = this.adapters[index];
@@ -140,7 +141,9 @@ export class ManagerService {
           };
         });
         const retained = this.store.catalog().bindings.filter(binding =>
-          binding.instanceId === instance.id && (project ? binding.projectId !== project.id : binding.projectId !== null),
+          binding.instanceId === instance.id && (project
+            ? binding.projectId !== null && binding.projectId !== project.id
+            : binding.projectId !== null),
         );
         const merged = new Map<string, Binding>();
         for (const binding of retained) merged.set(binding.id, binding);

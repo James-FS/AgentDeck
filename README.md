@@ -13,11 +13,15 @@ pnpm dev
 
 开发数据和默认扫描 home 位于 `work/dev-data` 与 `work/dev-data/home`，隔离演示文件位于 `work/demo`。可用 `AGENTDECK_DEV_HOME` 指定开发扫描 home。生产时用 `AGENTDECK_HOME` 指定管理器数据目录，或用 `USER_HOME` / `AGENTDECK_USER_HOME` 指定扫描 home。客户端自己的 `CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`DSH_HOME` 等环境变量仍可选择客户端配置根目录。
 
-自动发现的实例只读。只有手动登记并明确勾选可写的 Codex 实例可生成受支持的独立 MCP 计划；演示目标使用独立文件。客户端版本尚未实机验证，写入能力标为 experimental。原始计划字节和恢复快照可能包含秘密；当前保存为明文，没有额外加密或显式设置 Windows ACL，Windows 使用数据目录继承的系统 ACL。请将 `AGENTDECK_HOME` 放在仅当前用户可访问的位置，不要使用共享目录。
+首次打开资源页，点击“发现并扫描本机资源”读取当前用户的实际客户端配置；这会跳过开发模式默认的隔离扫描目录。扫描结果保存到本地索引，真实配置不会被改写。“重新扫描已登记实例”只刷新已经接入的目录。也可以载入隔离演示数据体验交互。
+
+自动发现的实例只读。只有手动登记并明确勾选可写的 Codex 实例可生成受支持的独立 MCP 计划；演示目标使用独立文件。本机只读配置与插件缓存布局已经核对，版本记录与证据范围见 [只读扫描兼容验证](docs/只读扫描兼容验证.md)；真实写入与运行时生效仍未验证，写入能力标为 experimental。原始计划字节和恢复快照可能包含秘密；当前保存为明文，没有额外加密或显式设置 Windows ACL，Windows 使用数据目录继承的系统 ACL。请将 `AGENTDECK_HOME` 放在仅当前用户可访问的位置，不要使用共享目录。
 
 AgentDeck is a local web manager for viewing Agent configuration instances, projects, Skills, plugins, and MCP entries. The first release provides a Vue 3 interface, a Fastify local API, SQLite persistence, four read-only adapter scanners, and a guarded Codex MCP plan/apply/restore path.
 
-Client versions have not been validated on real installations. Their detected capabilities remain experimental. Automatic discovery is read-only. A real write plan is available only for an explicitly registered Codex configuration root marked writable, and only for a supported independent MCP entry. The demo has a separate, isolated Codex target that exercises the same plan path without changing a real client configuration. The app does not start Skills, plugins, or MCP processes.
+Read-only configuration and plugin cache layouts have been checked on this Windows machine; version observations and validation limits are recorded in [the compatibility report](docs/只读扫描兼容验证.md). Runtime activation and real-client writing remain unverified. Automatic discovery is read-only. A real write plan is available only for an explicitly registered Codex configuration root marked writable, and only for a supported independent MCP entry. The demo has a separate, isolated Codex target that exercises the same plan path without changing a real client configuration. The app does not start Skills, plugins, or MCP processes.
+
+插件缓存按市场、插件身份与版本建立父子索引。资源页可区分缓存、配置记录和本地文件；详情分别展示资源配置状态、关联配置证据、缓存状态与未知运行状态。登记项目后点击项目卡片的“扫描项目”，读取该项目范围的候选配置和 Skills；项目配置及插件资源保持只读。
 
 ## Requirements
 

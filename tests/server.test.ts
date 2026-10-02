@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { request as httpRequest } from 'node:http';
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createApp } from '../apps/server/src/app.ts';
 import { createStore } from '../packages/storage/src/index.ts';
 import { applyPrepared, type PreparedChange } from '../packages/change-engine/src/index.ts';
 import type { AgentInstance, Catalog, ChangePlan, Operation } from '../packages/contracts/src/index.ts';
-import { copyCatalogFixture, createTestDirectory, removeTestDirectory } from './helpers.ts';
+import { copyCatalogFixture, createTestDirectory, fileTreeDigests, removeTestDirectory } from './helpers.ts';
 
 describe('local API with actual network peers and isolated configuration', () => {
   let directory: string;
@@ -19,7 +19,7 @@ describe('local API with actual network peers and isolated configuration', () =>
   beforeEach(async () => {
     directory = await createTestDirectory('server-');
     ({ home } = await copyCatalogFixture(directory));
-    app = createApp({ dataDir: path.join(directory, 'data'), homeDir: home, demoDir: path.join(directory, 'demo'), discoveryEnv: {}, allowedOrigins: [] });
+    app = createApp({ dataDir: path.join(directory, 'data'), homeDir: home, userHomeDir: home, userDiscoveryEnv: {}, demoDir: path.join(directory, 'demo'), discoveryEnv: {}, allowedOrigins: [] });
     origin = await app.listen({ host: '127.0.0.1', port: 0 });
     const response = await call('POST', '/api/v1/session/bootstrap', { ticket: app.agentdeckAuth.issueBootstrapTicket() }, false);
     expect(response.status).toBe(200);
@@ -64,6 +64,28 @@ describe('local API with actual network peers and isolated configuration', () =>
     expect(binding).toBeDefined();
     return { instance, binding };
   }
+
+  it('keeps configured discovery isolated until the explicit user-home scan, without changing source files', async () => {
+    await app.close();
+    app = createApp({ dataDir: path.join(directory, 'data'), homeDir: path.join(directory, 'empty-home'), userHomeDir: home, userDiscoveryEnv: {}, discoveryEnv: {}, allowedOrigins: [] });
+    origin = await app.listen({ host: '127.0.0.1', port: 0 });
+    const session = await call('POST', '/api/v1/session/bootstrap', { ticket: app.agentdeckAuth.issueBootstrapTicket() }, false);
+    cookie = String(session.headers['set-cookie']?.[0]).split(';')[0]!;
+    csrf = String(session.body.csrfToken);
+    const before = await fileTreeDigests(home);
+    const isolated = await call<Catalog>('POST', '/api/v1/scans', { discover: true });
+    expect(isolated.body.instances).toHaveLength(0);
+    expect((await call('POST', '/api/v1/scans', { discoverUserHome: true }, false)).status).toBe(401);
+    expect((await call('POST', '/api/v1/scans', { discoverUserHome: true }, true, { 'X-CSRF-Token': '' })).status).toBe(403);
+    const actual = await call<Catalog>('POST', '/api/v1/scans', { discoverUserHome: true });
+    expect(actual.status).toBe(200);
+    expect(actual.body.instances).toHaveLength(4);
+    expect(actual.body.bindings.length).toBeGreaterThan(5);
+    expect(actual.body.instances.every(item => !item.writable)).toBe(true);
+    expect(actual.body.bindings.every(item => !item.writable)).toBe(true);
+    expect(await fileTreeDigests(home)).toEqual(before);
+    expect(JSON.stringify(actual.body)).not.toContain('AGENTDECK_SECRET_SENTINEL');
+  });
 
   it('requires a session and CSRF token and consumes bootstrap tickets once', async () => {
     expect((await call('GET', '/api/v1/catalog', undefined, false)).status).toBe(401);
@@ -124,6 +146,28 @@ describe('local API with actual network peers and isolated configuration', () =>
     expect(new Set(rows.map(item => item.id)).size).toBe(rows.length);
     const rescanned = await call<Catalog>('POST', '/api/v1/scans', { instanceId: instance.id });
     expect((rescanned.body as Catalog).bindings.some(item => item.name === 'project-review' && item.projectId === projectId)).toBe(true);
+  });
+
+  it('refreshes removed global and selected-project sources while retaining another project', async () => {
+    const { instance } = await writableCodex();
+    const firstRoot = path.join(directory, 'project');
+    const secondRoot = path.join(directory, 'other-project');
+    await mkdir(path.join(secondRoot, '.agents/skills/second-review'), { recursive: true });
+    await writeFile(path.join(secondRoot, '.agents/skills/second-review/SKILL.md'), 'fixture');
+    const first = await call<{ id: string }>('POST', '/api/v1/projects', { rootPath: firstRoot });
+    const second = await call<{ id: string }>('POST', '/api/v1/projects', { rootPath: secondRoot });
+    await call('POST', '/api/v1/scans', { instanceId: instance.id, projectId: first.body.id });
+    const secondScan = await call<Catalog>('POST', '/api/v1/scans', { instanceId: instance.id, projectId: second.body.id });
+    const global = secondScan.body.bindings.find(item => item.kind === 'skill' && item.projectId === null && item.sourceKind === 'user')!;
+    expect(global).toBeDefined();
+    await rm(global.sourcePath, { recursive: true });
+    await rm(path.join(firstRoot, '.agents/skills/project-review'), { recursive: true });
+    const refreshed = await call<Catalog>('POST', '/api/v1/scans', { instanceId: instance.id, projectId: first.body.id });
+    expect(refreshed.status).toBe(200);
+    expect(refreshed.body.bindings.some(item => item.id === global.id)).toBe(false);
+    expect(refreshed.body.bindings.some(item => item.name === 'project-review' && item.projectId === first.body.id)).toBe(false);
+    expect(refreshed.body.bindings.some(item => item.name === 'second-review' && item.projectId === second.body.id)).toBe(true);
+    expect(new Set(refreshed.body.bindings.map(item => item.id)).size).toBe(refreshed.body.bindings.length);
   });
 
   it('persists a prepared plan, applies once, refreshes the catalog, and restores exact bytes', async () => {

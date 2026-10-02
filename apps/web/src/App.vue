@@ -16,6 +16,7 @@ const scopeFilter = ref<string[]>([]);
 const compatibilityFilter = ref<string[]>([]);
 const applicableAgentFilter = ref<string[]>([]);
 const sourceFilter = ref<string[]>([]);
+const originFilter = ref<'all' | 'cache' | 'configuration' | 'filesystem' | ''>('all');
 const expanded = ref(new Set<string>());
 const drawer = ref<'instance' | 'project' | 'plan' | 'binding' | null>(null);
 const actionBusy = ref(false);
@@ -56,14 +57,15 @@ const stats = computed(() => ({
 }));
 function matches(binding: Binding, includePluginChildren = false): boolean {
   const text = searchText.value.trim().toLocaleLowerCase();
-  if (text && !`${binding.name} ${binding.description} ${binding.nativeKey} ${binding.sourcePath}`.toLocaleLowerCase().includes(text)) return false;
+  if (text && !`${binding.name} ${binding.description} ${binding.nativeKey} ${binding.sourcePath} ${binding.pluginId ?? ''} ${binding.pluginVersion ?? ''} ${binding.marketplace ?? ''}`.toLocaleLowerCase().includes(text)) return false;
+  if (originFilter.value && originFilter.value !== 'all' && binding.origin !== originFilter.value) return false;
+  if (sourceFilter.value.length && !sourceFilter.value.includes(binding.sourceKind)) return false;
   if (!includePluginChildren && kindFilter.value !== 'all' && binding.kind !== kindFilter.value) return false;
   if (binding.kind === 'skill' && (kindFilter.value === 'all' || kindFilter.value === 'skill')) {
     const row = binding as SkillBinding;
     if (scopeFilter.value.length && !scopeFilter.value.includes(binding.scope)) return false;
     if (compatibilityFilter.value.length && !compatibilityFilter.value.includes(binding.compatibilityClass)) return false;
     if (applicableAgentFilter.value.length && !applicableAgentFilter.value.some((id) => (row.applicableAgentIds ?? []).includes(id))) return false;
-    if (sourceFilter.value.length && !sourceFilter.value.includes(binding.sourceKind)) return false;
   }
   return true;
 }
@@ -100,6 +102,14 @@ function readOnlyReason(binding: Binding): string {
 }
 function scopeLabel(value: string) { return ({ 'user-global': '用户全局', project: '项目级', 'project-directory': '项目子目录级', native: '原生特殊范围', session: '会话临时级（预留）' })[value] ?? '范围未判断'; }
 function sourceLabel(value: string) { return ({ user: '用户自建 / 导入', repository: '项目仓库提供', plugin: '插件附带', builtin: 'Agent 内置', organization: '组织管理', 'account-sync': '账号同步', unknown: '来源未知' })[value] ?? '来源未知'; }
+function originLabel(binding: Binding) {
+  if (binding.cacheState === 'missing') return '配置登记 · 缓存缺失';
+  if (binding.origin === 'cache') return `插件缓存存在${binding.pluginVersion ? ` · v${binding.pluginVersion}` : ''}${binding.marketplace ? ` · ${binding.marketplace}` : ''}`;
+  if (binding.origin === 'configuration') return `${binding.projectId ? '项目配置' : '用户配置'}${binding.cacheState === 'unknown' ? ' · 缓存未知' : ''}`;
+  if (binding.origin === 'filesystem') return binding.projectId ? '项目文件' : '本地文件';
+  return binding.projectId ? '项目来源' : '';
+}
+function stateLabel(enabled: boolean | null | undefined) { return enabled === true ? '配置已启用' : enabled === false ? '配置已停用' : '配置状态未知'; }
 function compatibilityLabel(binding: Binding) {
   const row = binding as SkillBinding;
   return row.compatibilitySummary ?? ({ portable: '跨 Agent 通用声明', 'agent-specific': 'Agent 专用', conditional: '部分兼容', unknown: '尚未判断' })[binding.compatibilityClass] ?? '尚未判断';
@@ -138,12 +148,25 @@ async function saveProject() {
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '登记失败'); }
   finally { actionBusy.value = false; }
 }
-async function scan(discover = false) {
+async function scan(discover = false, discoverUserHome = false) {
   actionBusy.value = true;
   try {
-    store.setCatalog(await api.scan({ discover, ...(store.selectedInstanceId ? { instanceId: store.selectedInstanceId } : {}), ...(store.selectedProjectId ? { projectId: store.selectedProjectId } : {}) }));
-    ElMessage.success(discover ? '扫描与实例发现已完成' : '只读扫描已完成');
+    if (discoverUserHome) { store.selectedInstanceId = ''; store.selectedProjectId = ''; clearFilters(); }
+    store.setCatalog(await api.scan({ discover, discoverUserHome, ...(store.selectedInstanceId ? { instanceId: store.selectedInstanceId } : {}), ...(store.selectedProjectId ? { projectId: store.selectedProjectId } : {}) }));
+    ElMessage.success(discoverUserHome ? `本机只读扫描完成，索引共 ${store.bindings.length} 项资源` : discover ? '扫描与实例发现已完成' : '只读扫描已完成');
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '扫描失败'); }
+  finally { actionBusy.value = false; }
+}
+async function scanProject(projectId: string) {
+  actionBusy.value = true;
+  try {
+    clearFilters();
+    store.selectedInstanceId = '';
+    store.selectedProjectId = projectId;
+    store.setCatalog(await api.scan({ projectId }));
+    page.value = 'resources';
+    ElMessage.success('项目只读扫描完成');
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '项目扫描失败'); }
   finally { actionBusy.value = false; }
 }
 async function demo() {
@@ -183,7 +206,7 @@ async function planRestore(operation: Operation) {
   finally { restoreBusy.value = ''; }
 }
 function goTo(next: Page) { page.value = next; if (next === 'operations') void loadOperations(); }
-function clearFilters() { kindFilter.value = 'all'; scopeFilter.value = []; compatibilityFilter.value = []; applicableAgentFilter.value = []; sourceFilter.value = []; searchText.value = ''; }
+function clearFilters() { kindFilter.value = 'all'; scopeFilter.value = []; compatibilityFilter.value = []; applicableAgentFilter.value = []; sourceFilter.value = []; originFilter.value = 'all'; searchText.value = ''; }
 function openEvents() {
   if (eventSource) return;
   const source = new EventSource(api.eventsUrl(), { withCredentials: true });
@@ -233,7 +256,7 @@ onBeforeUnmount(() => eventSource?.close());
 
       <section v-else class="content">
         <div class="page-heading"><div><small class="eyebrow"><i></i> LOCAL ENVIRONMENT</small><h1>{{ pages.find((item) => item.id === page)?.label }}</h1><p>{{ page === 'resources' ? '查看本机配置发现的 Skill、插件和 MCP，状态来自当前注册适配器。' : page === 'instances' ? '登记配置根目录并查看适配器注册表提供的能力范围。' : page === 'projects' ? '手动登记项目根目录，为扫描提供明确边界。' : page === 'operations' ? '查看配置变更结果，并从成功操作创建恢复计划。' : '本机 Agent 配置资源与扫描状态。' }}</p></div>
-          <div class="heading-actions"><template v-if="page === 'instances'"><el-button @click="scan(true)" :loading="actionBusy"><el-icon><Search /></el-icon>发现客户端</el-button><el-button type="primary" @click="openInstanceForm"><el-icon><Plus /></el-icon>登记实例</el-button></template><el-button v-if="page === 'projects'" type="primary" @click="openProjectForm"><el-icon><FolderAdd /></el-icon>登记项目</el-button><el-button v-if="page === 'resources' || page === 'overview'" @click="scan(false)" :loading="actionBusy"><el-icon><Refresh /></el-icon>只读扫描</el-button></div>
+          <div class="heading-actions"><template v-if="page === 'instances'"><el-button @click="scan(true, true)" :loading="actionBusy"><el-icon><Search /></el-icon>发现客户端</el-button><el-button type="primary" @click="openInstanceForm"><el-icon><Plus /></el-icon>登记实例</el-button></template><el-button v-if="page === 'projects'" type="primary" @click="openProjectForm"><el-icon><FolderAdd /></el-icon>登记项目</el-button><template v-if="page === 'resources' || page === 'overview'"><el-button @click="scan(false)" :loading="actionBusy"><el-icon><Refresh /></el-icon>重新扫描已登记实例</el-button><el-button type="primary" @click="scan(true, true)" :loading="actionBusy"><el-icon><Search /></el-icon>发现并扫描本机资源</el-button></template></div>
         </div>
         <div v-if="store.refreshError" class="inline-error"><el-icon><InfoFilled /></el-icon><span>{{ store.refreshError }}</span><el-button text @click="refresh">重试</el-button></div>
 
@@ -244,20 +267,21 @@ onBeforeUnmount(() => eventSource?.close());
               <el-select v-model="scopeFilter" multiple collapse-tags collapse-tags-tooltip clearable placeholder="作用范围" :disabled="kindFilter==='plugin'||kindFilter==='mcp'"><el-option label="用户全局" value="user-global"/><el-option label="项目级" value="project"/><el-option label="项目子目录级" value="project-directory"/><el-option label="原生特殊范围" value="native"/></el-select>
               <el-select v-model="compatibilityFilter" multiple collapse-tags collapse-tags-tooltip clearable placeholder="客户端适用性" :disabled="kindFilter==='plugin'||kindFilter==='mcp'"><el-option label="跨 Agent 通用声明" value="portable"/><el-option label="Agent 专用" value="agent-specific"/><el-option label="部分兼容" value="conditional"/><el-option label="尚未判断" value="unknown"/></el-select>
               <el-select v-model="applicableAgentFilter" multiple collapse-tags collapse-tags-tooltip clearable placeholder="适用 Agent" :disabled="kindFilter==='plugin'||kindFilter==='mcp'||!skillAgentsKnown"><el-option v-for="a in store.adapters" :key="a.id" :value="a.id" :label="a.name"/></el-select>
-              <el-select v-model="sourceFilter" multiple collapse-tags collapse-tags-tooltip clearable placeholder="来源" :disabled="kindFilter==='plugin'||kindFilter==='mcp'"><el-option label="用户自建 / 导入" value="user"/><el-option label="项目仓库提供" value="repository"/><el-option label="插件附带" value="plugin"/><el-option label="Agent 内置" value="builtin"/><el-option label="组织管理" value="organization"/><el-option label="账号同步" value="account-sync"/><el-option label="来源未知" value="unknown"/></el-select>
+              <el-select v-model="sourceFilter" multiple collapse-tags collapse-tags-tooltip clearable placeholder="资源来源"><el-option label="用户自建 / 导入" value="user"/><el-option label="项目仓库提供" value="repository"/><el-option label="插件附带" value="plugin"/><el-option label="Agent 内置" value="builtin"/><el-option label="组织管理" value="organization"/><el-option label="账号同步" value="account-sync"/><el-option label="来源未知" value="unknown"/></el-select>
+              <el-select v-model="originFilter" clearable placeholder="配置或文件来源"><el-option label="全部来源类型" value="all"/><el-option label="插件缓存" value="cache"/><el-option label="配置记录" value="configuration"/><el-option label="本地文件" value="filesystem"/></el-select>
             </div></div>
             <div v-if="!skillAgentsKnown && kindFilter!=='plugin' && kindFilter!=='mcp'" class="taxonomy-note"><el-icon><InfoFilled /></el-icon>尚无各 Agent 的兼容性检测结果，暂不能按适用 Agent 筛选。</div>
             <div v-if="visible.length" class="table-scroll"><table><thead><tr><th>扩展资源</th><th>作用范围</th><th>客户端适用性</th><th>来源</th><th>配置状态</th><th>运行状态</th><th>控制能力</th><th></th></tr></thead><tbody>
               <tr v-for="item in visible" :key="item.binding.id" :class="{child:item.depth>0,parent:item.binding.kind==='plugin'}"><td><div class="resource-cell" :style="{paddingLeft:`${item.depth*24}px`}"><button v-if="item.binding.kind==='plugin'&&item.children" class="tree-toggle" :class="{expanded:expanded.has(item.binding.id)}" :aria-expanded="expanded.has(item.binding.id)" :aria-label="expanded.has(item.binding.id)?'收起插件组件':'展开插件组件'" @click="togglePlugin(item.binding.id)">›</button><span v-else-if="item.depth" class="tree-stem"></span><i class="kind-icon" :class="item.binding.kind"><el-icon><component :is="item.binding.kind==='skill'?Document:item.binding.kind==='plugin'?Box:Connection"/></el-icon></i><div class="resource-copy"><button class="resource-detail-link" @click="openBinding(item.binding)">{{ item.binding.name }}</button><small>{{ item.depth ? `由 ${store.bindings.find(b=>b.id===item.binding.parentId)?.name??'插件'} 提供` : item.binding.description || item.binding.nativeKey || item.binding.sourcePath }}</small></div><small v-if="item.binding.kind==='plugin'&&item.children" class="child-count">{{ item.children }} 项</small></div></td>
-                <td><span v-if="item.binding.kind==='skill'" class="tag scope">{{ (item.binding as SkillBinding).scopeLabel ?? scopeLabel(item.binding.scope) }}</span><span v-else class="muted-text">原生资源</span></td>
+                <td><span v-if="item.binding.kind==='skill'" class="tag scope">{{ (item.binding as SkillBinding).scopeLabel ?? scopeLabel(item.binding.scope) }}</span><span v-else>{{ scopeLabel(item.binding.scope) }}</span></td>
                 <td><span v-if="item.binding.kind==='skill'" class="compat"><i :class="item.binding.compatibilityClass"></i>{{ compatibilityLabel(item.binding) }}<el-tooltip v-if="!Array.isArray((item.binding as SkillBinding).applicableAgentIds)" content="本轮契约没有逐 Agent 适用报告，不能据此判断目标客户端。"><el-icon><InfoFilled /></el-icon></el-tooltip><small v-else>{{ applicableLabel(item.binding) }}</small></span><span v-else class="muted-text">—</span></td>
-                <td><span v-if="item.binding.kind==='skill'" class="tag source">{{ (item.binding as SkillBinding).sourceLabel ?? sourceLabel(item.binding.sourceKind) }}</span><span v-else>{{ sourceLabel(item.binding.sourceKind) }}</span></td>
+                <td><span v-if="item.binding.kind==='skill'" class="tag source">{{ (item.binding as SkillBinding).sourceLabel ?? sourceLabel(item.binding.sourceKind) }}</span><span v-else>{{ sourceLabel(item.binding.sourceKind) }}</span><small v-if="originLabel(item.binding)" class="origin-detail">{{ originLabel(item.binding) }}</small></td>
                 <td><span class="config-state" :class="item.binding.enabled===true?'on':item.binding.enabled===false?'off':'unknown'"><i></i>{{ item.binding.enabled===true?'已启用':item.binding.enabled===false?'已停用':'未知' }}</span></td>
                 <td><span class="runtime-state" :class="item.binding.runtime">{{ runtimeLabel(item.binding.runtime) }}</span></td>
                 <td><el-tooltip v-if="canPlan(item.binding)" :content="`实验性计划：${readOnlyReason(item.binding)}`"><button class="plan-link" :disabled="actionBusy" @click="planToggle(item.binding,item.binding.enabled!==true)">{{ item.binding.enabled===true?'计划停用':item.binding.enabled===false?'计划启用':'生成启用计划' }}<el-icon><ArrowRight/></el-icon></button></el-tooltip><el-tooltip v-else :content="readOnlyReason(item.binding)"><span class="readonly"><el-icon><Setting/></el-icon>只读</span></el-tooltip></td>
                 <td><el-tooltip v-if="item.binding.diagnostics.length" :content="item.binding.diagnostics.join('；')"><el-icon class="notice"><InfoFilled/></el-icon></el-tooltip></td></tr>
             </tbody></table></div>
-            <div v-else-if="!store.bindings.length" class="empty"><i><el-icon><Box/></el-icon></i><b>还没有可显示的资源</b><span>{{ store.catalog?.lastScanAt ? '扫描完成，但适配器没有发现资源。' : '执行只读扫描，或载入隔离演示环境查看交互。' }}</span><div><el-button type="primary" :loading="actionBusy" @click="scan(false)"><el-icon><Search/></el-icon>开始只读扫描</el-button><el-button v-if="!store.instances.length&&!store.projects.length" :loading="actionBusy" @click="demo">载入隔离演示数据</el-button></div></div>
+            <div v-else-if="!store.bindings.length" class="empty"><i><el-icon><Box/></el-icon></i><b>还没有可显示的资源</b><span>{{ store.instances.length ? '已登记实例尚未发现资源，可重新扫描或发现本机客户端。' : '尚未接入本机配置。开发模式默认使用隔离目录；点击下方按钮只读扫描当前用户的客户端配置。' }}</span><div><el-button type="primary" :loading="actionBusy" @click="scan(true, true)"><el-icon><Search/></el-icon>扫描本机配置（只读）</el-button><el-button v-if="!store.instances.length&&!store.projects.length" :loading="actionBusy" @click="demo">载入隔离演示数据</el-button></div></div>
             <div v-else class="empty-filter"><el-icon><Search/></el-icon>当前筛选没有匹配项<el-button text @click="clearFilters">清除筛选</el-button></div>
             <footer class="panel-footer"><span>显示 {{ visible.length }} 项 <template v-if="store.catalog?.lastScanAt">· 最近扫描 {{ timeLabel(store.catalog.lastScanAt) }}</template></span><span><i :class="eventStatus"></i>{{ eventStatus==='connected'?'实时事件已连接':eventStatus==='connecting'?'连接实时事件…':'事件通道离线' }}</span></footer>
           </section>
@@ -265,11 +289,11 @@ onBeforeUnmount(() => eventSource?.close());
 
         <section v-else-if="page==='instances'" class="panel records-panel"><div class="panel-heading"><div><h2>已登记实例</h2><small>客户端枚举及能力来自 /api/v1/adapters</small></div><el-button type="primary" @click="openInstanceForm"><el-icon><Plus/></el-icon>登记实例</el-button></div>
           <div v-if="store.instances.length" class="instance-grid"><article v-for="i in store.instances" :key="i.id" class="instance-card"><div class="instance-top"><i>{{ agentName(i.agentId).slice(0,1) }}</i><small :class="i.discovery">{{ i.discovery==='auto'?'自动发现':i.discovery==='manual'?'手动登记':'隔离演示' }}</small></div><h3>{{ i.name }}</h3><span class="instance-client">{{ agentName(i.agentId) }} · {{ i.version??'版本未知' }}</span><div class="path-block"><small>配置根目录</small><code>{{ i.configRoot }}</code></div><div class="policy"><small>本机控制策略</small><b>{{ i.writable?'登记为可写目标':'只读' }}</b><span>{{ i.writable?'仍需资源级校验；首轮仅限 Codex 独立 MCP。':'当前实例不允许生成配置写入计划。' }}</span></div><footer>{{ timeLabel(i.checkedAt) }}<span>{{ store.bindings.filter(b=>b.instanceId===i.id).length }} 项资源</span></footer><p v-if="i.diagnostics.length" class="diagnostics"><el-icon><InfoFilled/></el-icon>{{ i.diagnostics.join('；') }}</p></article></div>
-          <div v-else class="empty"><i><el-icon><Connection/></el-icon></i><b>尚未登记 Agent 实例</b><span>自动发现只报告适配器识别的客户端；也可以手动登记配置根目录。</span><div><el-button type="primary" @click="scan(true)" :loading="actionBusy">发现客户端</el-button><el-button @click="openInstanceForm">手动登记</el-button></div></div>
+          <div v-else class="empty"><i><el-icon><Connection/></el-icon></i><b>尚未登记 Agent 实例</b><span>自动发现只报告适配器识别的客户端；也可以手动登记配置根目录。</span><div><el-button type="primary" @click="scan(true, true)" :loading="actionBusy">发现客户端</el-button><el-button @click="openInstanceForm">手动登记</el-button></div></div>
           <div class="capabilities"><div class="cap-title"><el-icon><Connection/></el-icon>已注册适配器<small>未来接入能力由服务端注册表动态呈现</small></div><div v-for="a in store.adapters" :key="a.id" class="cap-row"><div><b>{{ a.name }}</b><small>{{ a.description }}</small></div><span>{{ a.supportedKinds.map(k=>k==='mcp'?'MCP':k==='plugin'?'插件':'Skill').join('、')||'暂无资源类型声明' }} · {{ a.writeSupport.length?a.writeSupport.join('、'):'只读' }}</span></div></div>
         </section>
 
-        <section v-else-if="page==='projects'" class="panel records-panel"><div class="panel-heading"><div><h2>已登记项目</h2><small>仅扫描明确登记的项目根目录</small></div><el-button type="primary" @click="openProjectForm"><el-icon><FolderAdd/></el-icon>登记项目</el-button></div><div v-if="store.projects.length" class="project-list"><article v-for="p in store.projects" :key="p.id"><i><el-icon><Folder/></el-icon></i><div><b>{{ p.name }}</b><code>{{ p.rootPath }}</code></div><span>{{ store.bindings.filter(b=>b.projectId===p.id).length }} 项项目资源</span></article></div><div v-else class="empty"><i><el-icon><Folder/></el-icon></i><b>还没有登记项目</b><span>项目范围资源扫描需要明确的项目根目录。</span><div><el-button type="primary" @click="openProjectForm">登记项目</el-button></div></div></section>
+        <section v-else-if="page==='projects'" class="panel records-panel"><div class="panel-heading"><div><h2>已登记项目</h2><small>仅扫描明确登记的项目根目录</small></div><el-button type="primary" @click="openProjectForm"><el-icon><FolderAdd/></el-icon>登记项目</el-button></div><div v-if="store.projects.length" class="project-list"><article v-for="p in store.projects" :key="p.id"><i><el-icon><Folder/></el-icon></i><div><b>{{ p.name }}</b><code>{{ p.rootPath }}</code></div><span>{{ store.bindings.filter(b=>b.projectId===p.id).length }} 项项目资源</span><el-button :disabled="!store.sessionReady" :loading="actionBusy" @click="scanProject(p.id)">扫描项目</el-button></article></div><div v-else class="empty"><i><el-icon><Folder/></el-icon></i><b>还没有登记项目</b><span>项目范围资源扫描需要明确的项目根目录。</span><div><el-button type="primary" @click="openProjectForm">登记项目</el-button></div></div></section>
 
         <section v-else class="panel records-panel"><div class="panel-heading"><div><h2>变更历史</h2><small>成功操作可生成恢复计划；应用前服务端会再次检查摘要。</small></div><el-button @click="loadOperations"><el-icon><Refresh/></el-icon>刷新记录</el-button></div><div v-if="operationsError" class="inline-error"><el-icon><InfoFilled/></el-icon>{{ operationsError }}<el-button text @click="loadOperations">重试</el-button></div><div v-if="operations.length" class="table-scroll"><table class="operation-table"><thead><tr><th>操作</th><th>目标路径</th><th>结果</th><th>创建时间</th><th>恢复</th></tr></thead><tbody><tr v-for="op in operations" :key="op.id"><td><b>{{ op.kind==='restore'?'恢复配置':'启停配置' }}</b><small class="op-id">{{ op.id.slice(0,10) }}</small></td><td><code>{{ op.targetPath }}</code></td><td><span :class="['op-status',op.status]">{{ op.status==='succeeded'?'已完成':op.status==='conflict'?'检测到冲突':'失败' }}</span><small v-if="op.error" class="op-error">{{ op.error }}</small></td><td>{{ timeLabel(op.createdAt) }}</td><td><el-button v-if="op.status==='succeeded'" size="small" :loading="restoreBusy===op.id" @click="planRestore(op)">创建恢复计划</el-button><span v-else class="muted-text">需成功操作后才能恢复</span></td></tr></tbody></table></div><div v-else-if="!operationsError" class="empty"><i><el-icon><List/></el-icon></i><b>暂无配置操作</b><span>当前首轮只有符合条件的 Codex 独立 MCP 才能生成实验性计划。</span><div><el-button @click="goTo('resources')">查看资源</el-button></div></div></section>
       </section>
@@ -286,7 +310,8 @@ onBeforeUnmount(() => eventSource?.close());
         </div>
         <div class="detail-grid">
           <div><small>所属客户端</small><b>{{ agentName(store.instances.find(i=>i.id===selectedBinding?.instanceId)?.agentId??'') }}</b></div>
-          <div><small>配置状态</small><b>{{ selectedBinding.enabled===true?'配置已启用':selectedBinding.enabled===false?'配置已停用':'配置状态未知' }}</b></div>
+          <div><small>配置状态</small><b>{{ stateLabel(selectedBinding.enabled) }}</b></div>
+          <div><small>索引来源</small><b>{{ originLabel(selectedBinding) || '来源类型未知' }}</b></div>
           <div><small>运行状态</small><b>{{ runtimeLabel(selectedBinding.runtime) }}</b></div>
           <div><small>来源</small><b>{{ sourceLabel(selectedBinding.sourceKind) }}</b></div>
           <div><small>作用范围</small><b>{{ scopeLabel(selectedBinding.scope) }}</b></div>
@@ -294,6 +319,13 @@ onBeforeUnmount(() => eventSource?.close());
           <div class="wide"><small>适用 Agent 证据</small><b>{{ selectedBinding.kind==='skill'?applicableLabel(selectedBinding):'该资源类型不属于 Skill 适用性分类' }}</b></div>
           <div class="wide"><small>来源路径</small><code>{{ selectedBinding.sourcePath||'服务未提供路径' }}</code></div>
           <div class="wide"><small>原生配置键</small><code>{{ selectedBinding.nativeKey||'服务未提供键名' }}</code></div>
+          <div v-if="selectedBinding.pluginId" class="wide"><small>完整插件身份</small><code>{{ selectedBinding.pluginId }}</code></div>
+          <div v-if="selectedBinding.pluginVersion" class="wide"><small>缓存版本</small><b>{{ selectedBinding.pluginVersion }}<template v-if="selectedBinding.marketplace"> · {{ selectedBinding.marketplace }}</template></b></div>
+          <div v-if="selectedBinding.cacheState" class="wide"><small>缓存状态</small><b>{{ selectedBinding.cacheState==='present'?'缓存存在':selectedBinding.cacheState==='missing'?'缓存缺失':'缓存状态未知' }}</b></div>
+          <div v-if="selectedBinding.configurationEnabled!==undefined" class="wide"><small>关联配置状态</small><b>{{ stateLabel(selectedBinding.configurationEnabled) }}</b></div>
+          <div v-if="selectedBinding.configurationSourcePath" class="wide"><small>配置证据文件</small><code>{{ selectedBinding.configurationSourcePath }}</code></div>
+          <div v-if="selectedBinding.configurationKey" class="wide"><small>配置关联键</small><code>{{ selectedBinding.configurationKey }}</code></div>
+          <div v-if="selectedBinding.projectId" class="wide"><small>项目来源</small><b>{{ store.projects.find(p=>p.id===selectedBinding?.projectId)?.name??selectedBinding.projectId }} · {{ sourceLabel(selectedBinding.sourceKind) }}</b></div>
           <div v-if="selectedBinding.parentId" class="wide"><small>所属插件</small><b>{{ store.bindings.find(b=>b.id===selectedBinding?.parentId)?.name??selectedBinding.parentId }}</b></div>
           <div class="wide"><small>控制能力</small><b>{{ canPlan(selectedBinding)?'实验性 Codex MCP 计划可用':`只读 · ${readOnlyReason(selectedBinding)}` }}</b></div>
           <div class="wide"><small>最近更新</small><b>{{ timeLabel(selectedBinding.updatedAt) }}</b></div>
@@ -309,4 +341,5 @@ onBeforeUnmount(() => eventSource?.close());
 .resource-detail-link{max-width:230px;overflow:hidden;padding:0;border:0;background:transparent;color:#495b51;font-size:9px;font-weight:700;text-align:left;text-overflow:ellipsis;white-space:nowrap}.resource-detail-link:hover{color:#247451;text-decoration:underline;text-underline-offset:2px}
 .tree-toggle.expanded{transform:rotate(90deg)}
 .detail-header{display:flex;align-items:center;gap:10px;padding:1px 0 16px;border-bottom:1px solid #e9eeeb}.detail-header>div{display:flex;min-width:0;flex-direction:column;gap:5px}.detail-header b{color:#45594c;font-size:11px}.detail-header small{color:#929e97;font-size:8px;overflow-wrap:anywhere}.detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 12px;margin-top:9px}.detail-grid>div{display:flex;min-width:0;flex-direction:column;gap:6px;padding:12px 2px;border-bottom:1px solid #edf1ee}.detail-grid>div.wide{grid-column:1/-1}.detail-grid small{color:#9aa69f;font-size:7px}.detail-grid b{color:#617168;font-size:8px;font-weight:600;line-height:1.55;overflow-wrap:anywhere}.detail-grid code{color:#65766d;font:7px/1.6 'DM Mono',monospace;overflow-wrap:anywhere}.detail-diagnostics{margin-top:16px;padding:12px;border:1px solid #efe8d8;border-radius:6px;background:#fdfbf6;color:#897651;font-size:8px}.detail-diagnostics>b{font-size:8px}.detail-diagnostics p{display:flex;gap:6px;align-items:flex-start;margin:8px 0 0;line-height:1.6}.detail-diagnostics p .el-icon{margin-top:1px;flex:0 0 auto}.detail-diagnostics.quiet{display:flex;align-items:center;gap:6px;border-color:#e9eeeb;background:#f7f9f7;color:#95a199}
+.origin-detail{display:block;margin-top:3px;color:#86968c;font-size:7px;line-height:1.5;overflow-wrap:anywhere}.project-list article>.el-button{margin-left:auto;flex:0 0 auto}
 </style>

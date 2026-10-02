@@ -44,6 +44,15 @@ export interface Binding {
   readOnlyReason: string | null;
   diagnostics: string[];
   updatedAt: string;
+  /** Optional provenance fields; older persisted Binding JSON remains valid. */
+  origin?: 'configuration' | 'cache' | 'filesystem';
+  pluginId?: string;
+  pluginVersion?: string;
+  marketplace?: string;
+  configurationSourcePath?: string;
+  configurationKey?: string;
+  configurationEnabled?: boolean | null;
+  cacheState?: 'present' | 'missing' | 'unknown';
 }
 
 export interface Catalog {
@@ -116,6 +125,7 @@ export const RegisterProjectSchema = z.object({
 });
 export const ScanRequestSchema = z.object({
   discover: z.boolean().optional().default(false),
+  discoverUserHome: z.boolean().optional().default(false),
   instanceId: z.string().optional(),
   projectId: z.string().optional(),
 });
