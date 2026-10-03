@@ -92,6 +92,12 @@ export interface Binding {
   kind: ResourceKind;
   name: string;
   description: string;
+  /** Optional SKILL.md title for display; name remains the native configuration identity. */
+  displayName?: string;
+  /** Grouped Skill found on disk without verified client visibility. */
+  discoveryOnly?: boolean;
+  /** Relative path below the registered Skill root, for grouped inventory rows. */
+  discoveryPath?: string;
   scope: SkillScope;
   sourceKind: SourceKind;
   compatibilityClass: CompatibilityClass;
@@ -132,10 +138,11 @@ export interface RuntimeObservation {
   configurationEnabled: boolean | null;
   indexUpdatedAt: string;
   sessionLoad: 'not-checked' | 'not-applicable';
-  mcpConnection: 'not-checked' | 'not-applicable';
-  clientSessionId: null;
-  evidenceSource: null;
-  observedAt: null;
+  mcpConnection: 'not-checked' | 'not-applicable' | 'not-started' | 'starting' | 'connected' | 'authentication-required' | 'failed' | 'cancelled' | 'disabled';
+  clientSessionId: string | null;
+  threadId: string | null;
+  evidenceSource: 'codex-app-server-session' | null;
+  observedAt: string | null;
   reason: string;
 }
 

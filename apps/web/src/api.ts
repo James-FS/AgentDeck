@@ -88,6 +88,9 @@ function validateCatalog(value: unknown): Catalog {
     && typeof entry.instanceId === 'string' && (entry.projectId === null || typeof entry.projectId === 'string')
     && ['skill', 'plugin', 'mcp'].includes(String(entry.kind)) && typeof entry.name === 'string'
     && typeof entry.description === 'string'
+    && (entry.displayName === undefined || typeof entry.displayName === 'string')
+    && (entry.discoveryOnly === undefined || typeof entry.discoveryOnly === 'boolean')
+    && (entry.discoveryPath === undefined || typeof entry.discoveryPath === 'string')
     && ['user-global', 'project', 'project-directory', 'native'].includes(String(entry.scope))
     && ['user', 'repository', 'plugin', 'builtin', 'organization', 'account-sync', 'unknown'].includes(String(entry.sourceKind))
     && ['portable', 'agent-specific', 'conditional', 'unknown'].includes(String(entry.compatibilityClass))
@@ -125,8 +128,11 @@ function validateRuntimeReport(value: unknown): RuntimeReport {
       && (entry.configurationEnabled === null || typeof entry.configurationEnabled === 'boolean')
       && typeof entry.indexUpdatedAt === 'string'
       && ['not-checked', 'not-applicable'].includes(String(entry.sessionLoad))
-      && ['not-checked', 'not-applicable'].includes(String(entry.mcpConnection))
-      && entry.clientSessionId === null && entry.evidenceSource === null && entry.observedAt === null
+      && ['not-checked', 'not-applicable', 'not-started', 'starting', 'connected', 'authentication-required', 'failed', 'cancelled', 'disabled'].includes(String(entry.mcpConnection))
+      && (entry.clientSessionId === null || typeof entry.clientSessionId === 'string')
+      && (entry.threadId === null || typeof entry.threadId === 'string')
+      && (entry.evidenceSource === null || entry.evidenceSource === 'codex-app-server-session')
+      && (entry.observedAt === null || typeof entry.observedAt === 'string')
       && typeof entry.reason === 'string')) {
     throw new ApiFailure('服务返回的运行证据报告格式无效。', 200, 'INVALID_RESPONSE');
   }

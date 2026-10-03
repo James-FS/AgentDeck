@@ -520,7 +520,8 @@ export const claudeCodeAdapter: AgentAdapter = {
           && binding.name === name
           && binding.sourceKind === source.source
           && binding.scope === source.scope
-          && binding.parentId === null);
+          && binding.parentId === null
+          && [...globalSkillRoots, ...projectSkillRoots].some((root) => path.dirname(binding.sourcePath) === root));
         if (matches.length > 0) {
           for (const binding of matches) {
             binding.enabled = state;

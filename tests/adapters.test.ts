@@ -95,6 +95,65 @@ describe('independent adapter verification', () => {
     expect(await fileTreeDigests(home)).toEqual(before);
   });
 
+  it('uses bounded frontmatter only for Skill display, leaving native identity stable', async () => {
+    const skillDir = path.join(home, '.codex', 'skills', 'stable-directory');
+    const manifest = path.join(skillDir, 'SKILL.md');
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(manifest, '---\nname: "Friendly Skill"\ndescription: >\n  Helps review\n  local files.\n---\nNo execution.\n');
+    const first = (await adapter('codex').scan({ instance: instance('codex') })).bindings.find(item => item.sourcePath === skillDir)!;
+    expect(first.name).toBe('stable-directory');
+    expect(first.displayName).toBe('Friendly Skill');
+    expect(first.description).toBe('Helps review local files.');
+    await writeFile(manifest, '---\nname: "Renamed title"\ndescription: Updated summary.\n---\nNo execution.\n');
+    const second = (await adapter('codex').scan({ instance: instance('codex') })).bindings.find(item => item.sourcePath === skillDir)!;
+    expect(second.displayName).toBe('Renamed title');
+    expect(second.id).toBe(first.id);
+    expect(second.nativeKey).toBe(first.nativeKey);
+    await writeFile(manifest, '---\nname: [invalid, title]\ndescription: {not: a scalar}\n---\nNo execution.\n');
+    const fallback = (await adapter('codex').scan({ instance: instance('codex') })).bindings.find(item => item.sourcePath === skillDir)!;
+    expect(fallback.displayName).toBeUndefined();
+    expect(fallback.name).toBe('stable-directory');
+    expect(fallback.description).toBe('Skill 来自有限本地目录扫描。');
+  });
+
+  it('finds grouped Skills without treating them as client-loaded or controllable', async () => {
+    const root = path.join(home, '.codex', 'skills');
+    const grouped = path.join(root, 'collection', 'grouped-review');
+    const otherGroup = path.join(root, 'another-collection', 'grouped-review');
+    const deep = path.join(root, 'one', 'two', 'three', 'too-deep');
+    const outside = path.join(directory, 'outside-group');
+    await mkdir(grouped, { recursive: true });
+    await mkdir(otherGroup, { recursive: true });
+    await mkdir(deep, { recursive: true });
+    await mkdir(outside, { recursive: true });
+    await writeFile(path.join(grouped, 'SKILL.md'), '---\nname: Grouped Review\ndescription: Read-only grouped fixture.\n---\n');
+    await writeFile(path.join(otherGroup, 'SKILL.md'), '---\nname: Grouped Review\ndescription: Same name, separate source.\n---\n');
+    await writeFile(path.join(deep, 'SKILL.md'), '---\nname: Hidden by depth\n---\n');
+    await writeFile(path.join(outside, 'SKILL.md'), '---\nname: Outside\n---\n');
+    const link = path.join(root, 'linked-group');
+    await symlink(outside, link, process.platform === 'win32' ? 'junction' : 'dir');
+    try {
+      const before = await fileTreeDigests(home);
+      const report = await adapter('codex').scan({ instance: instance('codex') });
+      const skill = report.bindings.find(item => item.sourcePath === grouped)!;
+      expect(skill.name).toBe('grouped-review');
+      expect(skill.displayName).toBe('Grouped Review');
+      expect(skill.discoveryOnly).toBe(true);
+      expect(skill.discoveryPath).toBe('collection/grouped-review');
+      const peer = report.bindings.find(item => item.sourcePath === otherGroup)!;
+      expect(peer.discoveryPath).toBe('another-collection/grouped-review');
+      expect(peer.id).not.toBe(skill.id);
+      expect(skill.enabled).toBeNull();
+      expect(skill.writable).toBe(false);
+      expect(skill.runtime).toBe('unknown');
+      expect(skill.diagnostics.some(message => message.includes('仅为磁盘发现'))).toBe(true);
+      expect(report.bindings.some(item => item.sourcePath === deep || item.sourcePath === outside)).toBe(false);
+      expect(await fileTreeDigests(home)).toEqual(before);
+    } finally {
+      await rm(link);
+    }
+  });
+
   it('distinguishes Claude skill availability from its user source and global scope', async () => {
     const report = await adapter('claude-code').scan({ instance: instance('claude-code') });
     const skill = report.bindings.find((binding) => binding.name === 'claude-review' && binding.kind === 'skill');
@@ -103,6 +162,18 @@ describe('independent adapter verification', () => {
     expect(skill?.scope).toBe('user-global');
     expect(skill?.sourceKind).toBe('user');
     expect(skill?.compatibilityClass).toBe('unknown');
+  });
+
+  it('does not apply Claude name overrides to a grouped disk-only Skill', async () => {
+    const grouped = path.join(home, '.claude', 'skills', 'collection', 'claude-review');
+    await mkdir(grouped, { recursive: true });
+    await writeFile(path.join(grouped, 'SKILL.md'), '---\nname: Displayed Review\n---\n');
+    const report = await adapter('claude-code').scan({ instance: instance('claude-code') });
+    const skill = report.bindings.find(item => item.sourcePath === grouped)!;
+    expect(skill.displayName).toBe('Displayed Review');
+    expect(skill.enabled).toBeNull();
+    expect(skill.configurationEnabled).toBeUndefined();
+    expect(skill.runtime).toBe('unknown');
   });
 
   it('marks project resources as repository sources without making every skill portable', async () => {

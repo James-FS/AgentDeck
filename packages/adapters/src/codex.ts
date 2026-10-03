@@ -4,7 +4,7 @@ import type { AgentAdapter, AgentInstance, Binding, ScanContext, ScanReport } fr
 import path from 'node:path';
 import {
   baseBinding, declaredPath, directDirectories, expandPath, existsDirectory, existsRegularFile, findExecutable,
-  instance, isSafePathWithin, mcpTransport, object, report, safeMcpFile, safeTomlFile, scanSingleSkill, scanSkillRoot,
+  instance, isSafePathWithin, isWithin, mcpTransport, object, report, safeMcpFile, safeTomlFile, scanSingleSkill, scanSkillRoot,
 } from './shared.js';
 
 const discoveredHomes = new Map<string, string>();
@@ -398,11 +398,17 @@ export const codexAdapter: AgentAdapter = {
       if (binding.parentId !== null || binding.projectId !== null) continue;
       let target: CodexToggleTarget | undefined;
       if (binding.kind === 'skill' && binding.scope === 'user-global' && binding.sourceKind === 'user') {
+        const configSkillRoot = path.join(agent.configRoot, 'skills');
+        const groupedSkill = roots.some(root => isWithin(root.root, binding.sourcePath)
+          && path.dirname(binding.sourcePath) !== root.root);
         const manifest = path.join(binding.sourcePath, 'SKILL.md');
-        if (await existsRegularFile(manifest) && await isSafePathWithin(agent.configRoot, manifest)) {
+        if (path.dirname(binding.sourcePath) === configSkillRoot
+          && await existsRegularFile(manifest) && await isSafePathWithin(agent.configRoot, manifest)) {
           target = { kind: 'skill', path: manifest };
           binding.controlScope = 'user-config-skill';
-        } else binding.readOnlyReason = '初期仅验证配置根 skills 内的独立 SKILL.md；共享目录、项目和内置 Skill 保持只读。';
+        } else if (!groupedSkill) {
+          binding.readOnlyReason = '初期仅验证配置根 skills 内的独立 SKILL.md；共享目录、项目和内置 Skill 保持只读。';
+        }
       }
       if (binding.kind === 'plugin' && binding.origin === 'cache' && binding.pluginId && binding.configurationSourcePath === configPath) {
         const parts = pluginIdentityParts(binding.pluginId);

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { lstat, readFile, readdir, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { parse as parseJsonc, type ParseError } from 'jsonc-parser';
+import { isMap, isScalar, parseDocument } from 'yaml';
 import type {
   AgentInstance,
   Binding,
@@ -16,6 +17,9 @@ import type {
 export const MAX_SCAN_ENTRIES = 300;
 export const MAX_CONFIG_BYTES = 1024 * 1024;
 export const MAX_SKILL_BYTES = 96 * 1024;
+const MAX_SKILL_FRONTMATTER_BYTES = 8 * 1024;
+const MAX_SKILL_DIRECTORY_DEPTH = 3;
+const MAX_SKILL_DIRECTORY_VISITS = 600;
 
 export function stableId(prefix: string, ...parts: string[]): string {
   const digest = createHash('sha256').update(parts.join('\0')).digest('hex').slice(0, 24);
@@ -166,6 +170,9 @@ export function baseBinding(args: {
   sourcePath: string;
   nativeKey: string;
   description?: string;
+  displayName?: string;
+  discoveryOnly?: boolean;
+  discoveryPath?: string;
   enabled?: boolean | null;
   parentId?: string | null;
   writable?: boolean;
@@ -194,6 +201,9 @@ export function baseBinding(args: {
     kind: args.kind,
     name: args.name,
     description: args.description ?? safeDescription(args.kind, path.basename(sourcePath)),
+    ...(args.displayName === undefined ? {} : { displayName: args.displayName }),
+    ...(args.discoveryOnly === undefined ? {} : { discoveryOnly: args.discoveryOnly }),
+    ...(args.discoveryPath === undefined ? {} : { discoveryPath: args.discoveryPath }),
     scope: args.scope,
     sourceKind: args.sourceKind,
     compatibilityClass: args.kind === 'skill' ? 'unknown' : 'agent-specific',
@@ -274,6 +284,38 @@ export async function safeFileMtime(file: string): Promise<string> {
 
 export function projectScope(project?: Project): SkillScope { return project ? 'project' : 'user-global'; }
 
+interface SkillDisplayMetadata { name: string | null; description: string | null }
+
+function displayScalar(value: unknown, maxLength: number): string | null {
+  if (typeof value !== 'string') return null;
+  const text = value.replace(/\s+/g, ' ').trim();
+  return text && text.length <= maxLength && !/[\u0000-\u001f\u007f]/.test(text) ? text : null;
+}
+
+function readSkillDisplayMetadata(contents: Buffer): SkillDisplayMetadata {
+  const text = contents.toString('utf8').replace(/^\uFEFF/, '');
+  const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
+  if (!match || Buffer.byteLength(match[1]!, 'utf8') > MAX_SKILL_FRONTMATTER_BYTES) return { name: null, description: null };
+  try {
+    const document = parseDocument(match[1]!, { uniqueKeys: true, schema: 'core' });
+    if (document.errors.length || !isMap(document.contents)) return { name: null, description: null };
+    const name = document.contents.get('name', true);
+    const description = document.contents.get('description', true);
+    return {
+      name: isScalar(name) ? displayScalar(name.value, 120) : null,
+      description: isScalar(description) ? displayScalar(description.value, 500) : null,
+    };
+  } catch { return { name: null, description: null }; }
+}
+
+async function skillManifest(directory: string): Promise<string | null> {
+  for (const filename of ['SKILL.md', 'skill.md']) {
+    const candidate = path.join(directory, filename);
+    if (await existsRegularFile(candidate)) return candidate;
+  }
+  return null;
+}
+
 export async function scanSkillRoot(args: {
   root: string;
   context: ScanContext;
@@ -293,43 +335,57 @@ export async function scanSkillRoot(args: {
 }): Promise<Binding[]> {
   const bindings: Binding[] = [];
   if (!(await existsDirectory(args.root))) return bindings;
-  for (const info of await directDirectories(args.root, args.diagnostics, 'Skill root')) {
-    const name = path.basename(info);
-    // Use non-following file checks so a skill symlink never escapes its root.
-    let manifest: string | null = null;
-    for (const candidate of [path.join(info, 'SKILL.md'), path.join(info, 'skill.md')]) {
-      if (await existsRegularFile(candidate)) { manifest = candidate; break; }
+  let visited = 0;
+  const walk = async (root: string, depth: number): Promise<void> => {
+    if (visited >= MAX_SKILL_DIRECTORY_VISITS) return;
+    for (const info of await directDirectories(root, args.diagnostics, 'Skill root')) {
+      if (visited >= MAX_SKILL_DIRECTORY_VISITS) break;
+      visited += 1;
+      const name = path.basename(info);
+      if (name.startsWith('.') || !(await isSafePathWithin(args.root, info))) continue;
+      const manifest = await skillManifest(info);
+      if (!manifest) {
+        if (depth < MAX_SKILL_DIRECTORY_DEPTH) await walk(info, depth + 1);
+        continue;
+      }
+      let metadata: SkillDisplayMetadata;
+      try { metadata = readSkillDisplayMetadata(await boundedRead(manifest, MAX_SKILL_BYTES)); }
+      catch {
+        args.diagnostics.push(`Skill "${name}" 的 manifest 不可读或超限，已跳过。`);
+        continue;
+      }
+      const nested = depth > 1;
+      bindings.push(baseBinding({
+        context: args.context,
+        kind: 'skill',
+        name,
+        scope: args.scope,
+        sourceKind: args.sourceKind,
+        sourcePath: info,
+        nativeKey: path.resolve(info),
+        identityPath: await canonicalPath(info),
+        enabled: nested ? null : args.configurationEnabled ?? null,
+        ...(metadata.name ? { displayName: metadata.name } : {}),
+        ...(nested ? { discoveryOnly: true, discoveryPath: path.relative(args.root, info).split(path.sep).join('/') } : {}),
+        ...(args.parentId !== undefined ? { parentId: args.parentId } : {}),
+        ...(args.projectId !== undefined ? { projectId: args.projectId } : {}),
+        ...(args.origin === undefined ? {} : { origin: args.origin }),
+        ...(args.pluginId === undefined ? {} : { pluginId: args.pluginId }),
+        ...(args.pluginVersion === undefined ? {} : { pluginVersion: args.pluginVersion }),
+        ...(args.marketplace === undefined ? {} : { marketplace: args.marketplace }),
+        ...(args.configurationSourcePath === undefined ? {} : { configurationSourcePath: args.configurationSourcePath }),
+        ...(args.configurationKey === undefined ? {} : { configurationKey: args.configurationKey }),
+        ...(args.configurationEnabled === undefined ? {} : { configurationEnabled: nested ? null : args.configurationEnabled }),
+        ...(args.cacheState === undefined ? {} : { cacheState: args.cacheState }),
+        description: metadata.description ?? safeDescription('skill', name),
+        diagnostics: nested ? ['分组目录中的 Skill 仅为磁盘发现；当前客户端版本是否加载该路径尚未验证。'] : [],
+        readOnlyReason: nested ? '分组目录的客户端可见性与开关语义尚未验证；仅作只读盘点。'
+          : args.parentId ? '该 Skill 随父插件附带。' : '该客户端的 Skill 开关尚未验证；发现的文件保持只读。',
+      }));
     }
-    if (!manifest) continue;
-    try { await boundedRead(manifest, MAX_SKILL_BYTES); }
-    catch {
-      args.diagnostics.push(`Skill "${name}" 的 manifest 不可读或超限，已跳过。`);
-      continue;
-    }
-    bindings.push(baseBinding({
-      context: args.context,
-      kind: 'skill',
-      name,
-      scope: args.scope,
-      sourceKind: args.sourceKind,
-      sourcePath: info,
-      nativeKey: path.resolve(info),
-      identityPath: await canonicalPath(info),
-      enabled: args.configurationEnabled ?? null,
-      ...(args.parentId !== undefined ? { parentId: args.parentId } : {}),
-      ...(args.projectId !== undefined ? { projectId: args.projectId } : {}),
-      ...(args.origin === undefined ? {} : { origin: args.origin }),
-      ...(args.pluginId === undefined ? {} : { pluginId: args.pluginId }),
-      ...(args.pluginVersion === undefined ? {} : { pluginVersion: args.pluginVersion }),
-      ...(args.marketplace === undefined ? {} : { marketplace: args.marketplace }),
-      ...(args.configurationSourcePath === undefined ? {} : { configurationSourcePath: args.configurationSourcePath }),
-      ...(args.configurationKey === undefined ? {} : { configurationKey: args.configurationKey }),
-      ...(args.configurationEnabled === undefined ? {} : { configurationEnabled: args.configurationEnabled }),
-      ...(args.cacheState === undefined ? {} : { cacheState: args.cacheState }),
-      description: safeDescription('skill', name),
-      readOnlyReason: args.parentId ? '该 Skill 随父插件附带。' : '该客户端的 Skill 开关尚未验证；发现的文件保持只读。',
-    }));
-  }
+  };
+  await walk(args.root, 1);
+  if (visited >= MAX_SKILL_DIRECTORY_VISITS) args.diagnostics.push('Skill 分组目录扫描达到总目录数上限。');
   return bindings;
 }
 
@@ -350,13 +406,16 @@ export async function scanSingleSkill(args: {
   for (const filename of ['SKILL.md', 'skill.md']) {
     const manifest = path.join(args.directory, filename);
     if (!(await existsRegularFile(manifest))) continue;
-    try { await boundedRead(manifest, MAX_SKILL_BYTES); }
+    let metadata: SkillDisplayMetadata;
+    try { metadata = readSkillDisplayMetadata(await boundedRead(manifest, MAX_SKILL_BYTES)); }
     catch {
       args.diagnostics.push('某个插件声明的 Skill manifest 不可读或超限，已跳过。');
       return [];
     }
     return [baseBinding({
       context: args.context, kind: 'skill', name: path.basename(args.directory), scope: 'native',
+      ...(metadata.name ? { displayName: metadata.name } : {}),
+      description: metadata.description ?? safeDescription('skill', path.basename(args.directory)),
       sourceKind: 'plugin', sourcePath: args.directory, nativeKey: path.resolve(args.directory),
       identityPath: await canonicalPath(args.directory), parentId: args.parentId, projectId: null,
       origin: args.origin ?? 'cache', ...(args.pluginId === undefined ? {} : { pluginId: args.pluginId }),

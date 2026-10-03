@@ -12,7 +12,8 @@ import {
   type ExecutableResolver, type VersionCheckRunner,
 } from './version-check.js';
 import { buildCapabilityEvidence } from './compatibility.js';
-import { assessRuntimeEvidence } from './runtime.js';
+import { assessRuntimeEvidence, type RuntimeEvidenceProvider } from './runtime.js';
+export type { RuntimeEvidenceProvider, RuntimeEvidenceSnapshot, VerifiedClientSession, McpSessionEvidence } from './runtime.js';
 
 type RegisterInstanceInput = { agentId: string; name?: string; configRoot: string; writable?: boolean };
 type RegisterProjectInput = { name?: string; rootPath: string };
@@ -29,6 +30,7 @@ export interface ManagerOptions {
   versionRunner?: VersionCheckRunner;
   platform?: NodeJS.Platform;
   now?: () => Date;
+  runtimeEvidenceProvider?: RuntimeEvidenceProvider;
 }
 
 export interface ManagerStore {
@@ -52,6 +54,7 @@ export class ManagerService {
   readonly versionRunner: VersionCheckRunner;
   readonly platform: NodeJS.Platform;
   private readonly now: () => Date;
+  private readonly runtimeEvidenceProvider: RuntimeEvidenceProvider | undefined;
 
   constructor(options: ManagerOptions) {
     this.store = options.store;
@@ -64,10 +67,21 @@ export class ManagerService {
     this.versionRunner = options.versionRunner ?? runVersionCommand;
     this.platform = options.platform ?? process.platform;
     this.now = options.now ?? (() => new Date());
+    this.runtimeEvidenceProvider = options.runtimeEvidenceProvider;
   }
 
   catalog(): Catalog { return this.store.catalog(); }
-  runtimeReport() { return assessRuntimeEvidence(this.store.catalog(), this.now()); }
+  async runtimeReport() {
+    const catalog = this.store.catalog();
+    if (!this.runtimeEvidenceProvider) return assessRuntimeEvidence(catalog, this.now());
+    try {
+      const snapshot = await this.runtimeEvidenceProvider.readCurrentEvidence(catalog);
+      return assessRuntimeEvidence(catalog, this.now(), snapshot);
+    } catch {
+      // A provider failure never becomes a resource failure or exposes its raw response.
+      return assessRuntimeEvidence(catalog, this.now());
+    }
+  }
   adapterInfos(): AdapterInfo[] { return this.adapters.map(adapter => adapter.info); }
 
   async compatibilityReport(): Promise<CompatibilityReport> {

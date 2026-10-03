@@ -202,6 +202,9 @@ tbody tr.child td { background: #FCFDFC; }
 .kind-icon.plugin { background: var(--cat-plugin-bg); color: var(--cat-plugin); }
 .kind-icon.mcp { background: var(--cat-mcp-bg); color: var(--cat-mcp); }
 .resource-copy { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
+.resource-title { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.resource-title .resource-detail-link { min-width: 0; }
+.inventory-badge { flex: 0 0 auto; padding: 2px 6px; border-radius: 5px; background: #FFF4E6; color: #9A641E; font-size: var(--text-xs); white-space: nowrap; }
 .resource-copy b { max-width: 280px; overflow: hidden; color: var(--ink-1); font-size: var(--text-sm); text-overflow: ellipsis; white-space: nowrap; }
 .resource-copy small { max-width: 320px; overflow: hidden; color: var(--ink-3); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
 .child-count { padding: 2px 6px; border-radius: 8px; background: var(--line-soft); color: var(--ink-3); font-size: var(--text-xs); white-space: nowrap; }
@@ -226,6 +229,7 @@ tbody tr.child td { background: #FCFDFC; }
 .runtime-state.active { color: var(--ok); }
 .runtime-state.pending { color: var(--warn); }
 .runtime-state.inactive { color: var(--ink-3); }
+.runtime-state.failed { color: var(--bad); }
 .plan-link { display: inline-flex; align-items: center; gap: 4px; border: 0; padding: 4px 0; background: transparent; color: var(--brand); font-size: var(--text-sm); font-weight: 700; white-space: nowrap; }
 .plan-link:disabled { opacity: .55; cursor: wait; }
 .plan-link .el-icon { font-size: 12px; }

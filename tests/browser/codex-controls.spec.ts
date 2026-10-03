@@ -14,11 +14,13 @@ test('registers a writable Codex root, checks its version and previews/applies/r
   const configRoot = path.join(home, '.codex');
   const configPath = path.join(configRoot, 'config.toml');
   const skill = path.join(configRoot, 'skills/local-control/SKILL.md');
+  const groupedSkill = path.join(configRoot, 'skills/collection/grouped-browser/SKILL.md');
   const plugin = path.join(configRoot, 'plugins/cache/local/browser-plugin/1.0.0');
   const bin = path.join(root, 'shim bin');
-  for (const dir of [bin, path.dirname(skill), path.join(plugin, '.codex-plugin'), path.join(plugin, 'skills/plugin-child')]) await mkdir(dir, { recursive: true });
+  for (const dir of [bin, path.dirname(skill), path.dirname(groupedSkill), path.join(plugin, '.codex-plugin'), path.join(plugin, 'skills/plugin-child')]) await mkdir(dir, { recursive: true });
   await writeFile(path.join(bin, 'codex.cmd'), '@echo off\r\necho codex-cli 0.159.2\r\n');
   await writeFile(skill, '---\nname: local-control\ndescription: Isolated fixture\n---\nDo not execute.\n');
+  await writeFile(groupedSkill, '---\nname: Grouped Browser Title\ndescription: Browser fixture description.\n---\nDo not execute.\n');
   await writeFile(path.join(plugin, '.codex-plugin/plugin.json'), JSON.stringify({ name: 'browser-plugin', version: '1.0.0', skills: './skills' }));
   await writeFile(path.join(plugin, 'skills/plugin-child/SKILL.md'), 'fixture');
   await writeFile(configPath, `# Preserve fixture\n[plugins."browser-plugin@local"]\nenabled = true\n[marketplaces.local]\nsource_type = "local"\nsource = ${JSON.stringify(path.join(root, 'market'))}\n`);
@@ -40,6 +42,18 @@ test('registers a writable Codex root, checks its version and previews/applies/r
     await page.goto(startupUrl);
     await page.getByRole('button', { name: '扫描本机配置（只读）', exact: true }).click();
     const search = page.getByPlaceholder('搜索名称或来源路径');
+    await search.fill('Grouped Browser Title');
+    const groupedRow = page.getByRole('row').filter({ has: page.getByRole('button', { name: 'Grouped Browser Title', exact: true }) });
+    await expect(groupedRow.getByText('仅磁盘发现', { exact: true })).toBeVisible();
+    await expect(groupedRow.getByText('分组路径：collection/grouped-browser', { exact: false })).toBeVisible();
+    await expect(groupedRow.getByText('Browser fixture description.', { exact: false })).toBeVisible();
+    await expect(groupedRow.getByText('暂未检测', { exact: true })).toBeVisible();
+    await groupedRow.locator('.resource-detail-link').click();
+    await expect(page.getByRole('dialog').getByText('仅磁盘发现 · 客户端可见性未验证', { exact: true })).toBeVisible();
+    await expect(page.getByRole('dialog').getByText('collection/grouped-browser', { exact: true })).toBeVisible();
+    await expect(page.getByRole('dialog').getByText('分组目录的客户端可见性与开关语义尚未验证', { exact: false })).toBeVisible();
+    await page.getByRole('dialog').getByRole('button', { name: /Close|关闭/i }).first().click();
+    await expect(page.getByRole('dialog')).toBeHidden();
     await search.fill('local-control');
     let row = page.getByRole('row').filter({ has: page.getByRole('button', { name: 'local-control', exact: true }) });
     await expect(row.getByRole('button', { name: '计划停用', exact: true })).toHaveCount(0);
@@ -54,6 +68,9 @@ test('registers a writable Codex root, checks its version and previews/applies/r
     const card = page.locator('.instance-card').filter({ has: page.getByRole('heading', { name: 'Codex', exact: true }) });
     await card.getByRole('button', { name: /检查.*版本/ }).click();
     await expect(card.getByText('0.159.2', { exact: false }).first()).toBeVisible();
+    await page.getByRole('button', { name: '资源管理', exact: true }).click();
+    await search.fill('Grouped Browser Title');
+    await expect(groupedRow.getByRole('button', { name: '计划停用', exact: true })).toHaveCount(0);
     for (const name of ['local-control', 'browser-plugin']) {
       await page.getByRole('button', { name: '资源管理', exact: true }).click();
       await search.fill(name);

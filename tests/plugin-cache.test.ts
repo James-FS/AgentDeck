@@ -71,13 +71,16 @@ describe('plugin cache and project source integrity', () => {
     const root = path.join(home, '.codex/plugins/cache/fixture-market/custom-tools/1.0.0');
     await mkdir(path.join(root, '.codex-plugin'), { recursive: true });
     await mkdir(path.join(root, 'custom', 'single-review'), { recursive: true });
-    await writeFile(path.join(root, 'custom', 'single-review', 'SKILL.md'), 'fixture');
+    await writeFile(path.join(root, 'custom', 'single-review', 'SKILL.md'), '---\nname: Single Review Title\ndescription: Plugin skill summary.\n---\nfixture');
     await writeFile(path.join(root, '.codex-plugin/plugin.json'), JSON.stringify({
       name: 'custom-tools', version: '1.0.0', skills: ['./custom/single-review'],
       mcpServers: { 'inline-cache-docs': { command: 'fixture-only', env: { TOKEN: 'AGENTDECK_SECRET_SENTINEL' } } },
     }));
     const report = await scan('codex');
     assertChildren(report.bindings, ['single-review', 'inline-cache-docs']);
+    const skill = report.bindings.find(item => item.name === 'single-review')!;
+    expect(skill.displayName).toBe('Single Review Title');
+    expect(skill.description).toBe('Plugin skill summary.');
     expect(JSON.stringify(report)).not.toContain('AGENTDECK_SECRET_SENTINEL');
   });
   it('keeps invalid plugin MCP enabled values unknown even when its parent is explicitly enabled', async () => {
