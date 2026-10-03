@@ -16,17 +16,17 @@ function enabledValue(value: unknown): boolean | null {
 
 function pluginChildState(parentEnabled: boolean | null, rawServer: unknown): { enabled: boolean | null; diagnostics: string[] } {
   const server = object(rawServer);
-  if (parentEnabled === false) return { enabled: false, diagnostics: ['Disabled by the parent plugin configuration.'] };
-  if (!server) return { enabled: null, diagnostics: ['Plugin MCP entry is not a static table.'] };
+  if (parentEnabled === false) return { enabled: false, diagnostics: ['已由父插件配置停用。'] };
+  if (!server) return { enabled: null, diagnostics: ['插件 MCP 条目不是静态表。'] };
   const hasLocalValue = Object.hasOwn(server, 'enabled');
   const localEnabled = typeof server.enabled === 'boolean' ? server.enabled : null;
   if (hasLocalValue && localEnabled === null) {
-    return { enabled: null, diagnostics: ['The plugin MCP enabled field is not a static boolean.'] };
+    return { enabled: null, diagnostics: ['插件 MCP 的 enabled 字段不是静态布尔值。'] };
   }
   if (parentEnabled !== true) {
     return {
       enabled: null,
-      diagnostics: hasLocalValue ? ['A child enabled value cannot establish effective state without an enabled parent plugin identity.'] : ['Parent plugin configuration state is unknown.'],
+      diagnostics: hasLocalValue ? ['没有已启用的父插件身份时，子级 enabled 值不能确定生效状态。'] : ['父插件配置状态未知。'],
     };
   }
   return { enabled: hasLocalValue ? localEnabled : true, diagnostics: [] };
@@ -73,8 +73,8 @@ function addConfiguredCodexPlugins(args: {
       origin: 'configuration', pluginId: identity, ...(parts ? { marketplace: parts.marketplace } : {}),
       configurationSourcePath: config.sourcePath, configurationKey: config.key, configurationEnabled: config.enabled,
       cacheState: 'unknown',
-      diagnostics: plugin ? (parts ? [] : ['Plugin identity does not contain an exact name@marketplace pair.']) : ['Plugin table is not a static table.'],
-      readOnlyReason: 'Codex plugin toggles are outside the supported independent MCP change engine.',
+      diagnostics: plugin ? (parts ? [] : ['插件身份不包含精确的 name@marketplace 组合。']) : ['插件配置不是静态表。'],
+      readOnlyReason: 'Codex 插件开关不在受支持的独立 MCP 变更引擎范围内。',
     });
     args.bindings.push(parent);
     const servers = object(plugin?.mcp_servers);
@@ -90,7 +90,7 @@ function addConfiguredCodexPlugins(args: {
         configurationSourcePath: config.sourcePath, configurationKey: `${config.key}.mcp_servers.${serverName}`,
         configurationEnabled: config.enabled, cacheState: 'unknown',
         diagnostics: state.diagnostics,
-        readOnlyReason: 'MCP servers declared by a plugin are read-only; only independent Codex MCP tables can be changed.',
+        readOnlyReason: '插件声明的 MCP 只读；只有独立的 Codex MCP 表可修改。',
       }));
     }
   }
@@ -118,7 +118,7 @@ async function scanCodexPluginCache(args: {
     const entries = await directDirectories(directory, args.diagnostics, 'Codex plugin cache directory');
     const remaining = Math.max(0, MAX_CODEX_PLUGIN_DIRECTORY_ENTRIES - entriesScanned);
     entriesScanned += Math.min(entries.length, remaining);
-    if (entries.length > remaining) args.diagnostics.push('Codex plugin cache directory scan reached its bounded entry limit.');
+    if (entries.length > remaining) args.diagnostics.push('Codex 插件缓存目录扫描达到条目上限。');
     return entries.slice(0, remaining);
   };
   for (const marketplaceDir of await readDirectories(cacheRoot)) {
@@ -131,7 +131,7 @@ async function scanCodexPluginCache(args: {
       if (!(await isSafePathWithin(configRoot, pluginDir))) continue;
       for (const versionDir of await readDirectories(pluginDir)) {
         if (++packagesScanned > MAX_CODEX_PLUGIN_PACKAGES) {
-          args.diagnostics.push('Codex plugin cache package scan reached its bounded package limit.');
+          args.diagnostics.push('Codex 插件缓存包扫描达到包数上限。');
           return represented;
         }
         if (!(await isSafePathWithin(configRoot, versionDir))) continue;
@@ -155,10 +155,10 @@ async function scanCodexPluginCache(args: {
           ...(config ? { configurationSourcePath: config.sourcePath, configurationKey: config.key, configurationEnabled: config.enabled } : { configurationEnabled: null }),
           cacheState: 'present',
           diagnostics: [
-            ...(nameMismatch ? ['Plugin manifest name does not match its cache directory identity; configuration association was withheld.'] : []),
-            ...(!nameMismatch && !config ? ['This cached plugin version has no exact matching enabled plugin identity in config.toml.'] : []),
+            ...(nameMismatch ? ['插件 manifest 名称与缓存目录身份不一致，已撤销配置关联。'] : []),
+            ...(!nameMismatch && !config ? ['该缓存版本在 config.toml 中没有精确匹配的已启用插件身份。'] : []),
           ],
-          readOnlyReason: 'A cached plugin version is read-only; runtime selection cannot be inferred from cache contents.',
+          readOnlyReason: '缓存插件版本只读；无法从缓存内容推断当前运行版本。',
         });
         args.bindings.push(parent);
         if (!nameMismatch) represented.add(identity);
@@ -166,18 +166,18 @@ async function scanCodexPluginCache(args: {
         let skillDeclarations: string[] = ['./skills'];
         if (typeof manifest.skills === 'string') skillDeclarations = [manifest.skills];
         else if (Array.isArray(manifest.skills)) skillDeclarations = manifest.skills.filter((value): value is string => typeof value === 'string').slice(0, 20);
-        else if (manifest.skills !== undefined) args.diagnostics.push('Codex plugin Skills declaration has an unsupported shape.');
+        else if (manifest.skills !== undefined) args.diagnostics.push('Codex 插件 Skills 声明结构不受支持。');
         const seenSkillRoots = new Set<string>();
         for (const declaration of skillDeclarations) {
           const skillRoot = declaredPath(versionDir, declaration);
           if (!skillRoot) {
-            args.diagnostics.push('Codex plugin Skill declaration escapes or is not a relative path inside its package.');
+            args.diagnostics.push('Codex 插件 Skill 声明越界或不是包内相对路径。');
             continue;
           }
           if (seenSkillRoots.has(skillRoot)) continue;
           seenSkillRoots.add(skillRoot);
           if (!(await isSafePathWithin(configRoot, skillRoot))) {
-            if (await existsDirectory(skillRoot)) args.diagnostics.push('Codex plugin Skill declaration crosses a symlink or junction and was skipped.');
+            if (await existsDirectory(skillRoot)) args.diagnostics.push('Codex 插件 Skill 声明跨越符号链接或 junction，已跳过。');
             continue;
           }
           const metadata = {
@@ -195,7 +195,7 @@ async function scanCodexPluginCache(args: {
               configurationEnabled: config?.enabled ?? null, cacheState: 'present', diagnostics: args.diagnostics,
             });
             args.bindings.push(...children.slice(0, MAX_PLUGIN_SKILLS));
-            if (children.length > MAX_PLUGIN_SKILLS) args.diagnostics.push('A Codex plugin Skills root exceeded its bounded child limit.');
+            if (children.length > MAX_PLUGIN_SKILLS) args.diagnostics.push('某个 Codex 插件 Skills 根超过子项上限。');
           }
         }
 
@@ -205,10 +205,10 @@ async function scanCodexPluginCache(args: {
         if (typeof declaredMcp === 'string') {
           const mcpPath = declaredPath(versionDir, declaredMcp);
           if (!mcpPath) {
-            args.diagnostics.push('Codex plugin MCP declaration escapes or is not a relative path inside its package.');
+            args.diagnostics.push('Codex 插件 MCP 声明越界或不是包内相对路径。');
             serverValues = null;
           } else if (!(await isSafePathWithin(configRoot, mcpPath))) {
-            if (await existsRegularFile(mcpPath)) args.diagnostics.push('Codex plugin MCP declaration crosses a symlink or junction and was skipped.');
+            if (await existsRegularFile(mcpPath)) args.diagnostics.push('Codex 插件 MCP 声明跨越符号链接或 junction，已跳过。');
             serverValues = null;
           } else {
             mcpSource = mcpPath;
@@ -229,10 +229,10 @@ async function scanCodexPluginCache(args: {
               mcpTransport: mcpTransport(rawServer),
               cacheState: 'present',
               diagnostics: state.diagnostics,
-              readOnlyReason: 'MCP servers bundled with a cached plugin cannot be changed independently.',
+              readOnlyReason: '插件缓存附带的 MCP 不能独立修改。',
             }));
           }
-          if (Object.keys(servers).length > MAX_PLUGIN_MCP_SERVERS) args.diagnostics.push('A Codex plugin MCP manifest exceeded its bounded child limit.');
+          if (Object.keys(servers).length > MAX_PLUGIN_MCP_SERVERS) args.diagnostics.push('某个 Codex 插件 MCP 清单超过子项上限。');
         }
       }
     }
@@ -244,7 +244,7 @@ export const codexAdapter: AgentAdapter = {
   id: 'codex',
   name: 'Codex',
   info: {
-    id: 'codex', name: 'Codex', description: 'Read-only local discovery and bounded configuration scanning for Codex.',
+    id: 'codex', name: 'Codex', description: '对 Codex 的只读本地发现与有限配置扫描。',
     supportedKinds: ['skill', 'plugin', 'mcp'],
     writeSupport: ['experimental: manually registered writable instance, independent user MCP', 'Codex 0.159.2/win32: user config-root Skill overrides and configured local marketplace plugin toggles'],
   },
@@ -265,7 +265,7 @@ export const codexAdapter: AgentAdapter = {
     const configPath = path.join(agent.configRoot, 'config.toml');
     const configPathSafe = !(await existsRegularFile(configPath)) || await isSafePathWithin(agent.configRoot, configPath);
     if (!configPathSafe) {
-      diagnostics.push('Codex config.toml crosses a symlink or junction and was skipped.');
+      diagnostics.push('Codex config.toml 跨越符号链接或 junction，已跳过。');
     }
     const parsed = configPathSafe ? await safeTomlFile(configPath, diagnostics, 'Codex config.toml', (text) => {
       if (/\r(?!\n)/.test(text)) throw new Error('unsupported-line-ending');
@@ -287,11 +287,11 @@ export const codexAdapter: AgentAdapter = {
           const supported = tableCount === 1 && server !== null && enabledFieldIsSupported;
           const writable = writableInstance && supported;
           const reasons: string[] = [];
-          if (server?.enabled === undefined) reasons.push('Codex treats a missing enabled field as enabled by default.');
-          else if (server && typeof server.enabled !== 'boolean') reasons.push('The enabled field is not a TOML boolean.');
-          if (tableCount !== 1) reasons.push('The target table is duplicated or its syntax cannot be located safely.');
-          if (transport !== 'stdio') reasons.push('Native write evidence applies only to standalone stdio MCP entries.');
-          if (writableInstance && supported) reasons.push('Experimental write opt-in applies to structurally supported standalone user MCP, including HTTP and unknown transports. Native evidence remains limited to the verified STDIO scope; client runtime remains unobserved.');
+          if (server?.enabled === undefined) reasons.push('Codex 将缺失的 enabled 字段默认视为启用。');
+          else if (server && typeof server.enabled !== 'boolean') reasons.push('enabled 字段不是 TOML 布尔值。');
+          if (tableCount !== 1) reasons.push('目标表重复或无法安全定位其语法。');
+          if (transport !== 'stdio') reasons.push('原生写入证据仅适用于独立 STDIO MCP 条目。');
+          if (writableInstance && supported) reasons.push('实验性写入授权适用于结构受支持的独立用户级 MCP（含 HTTP 与未知传输）；原生证据仍限于已验收的 STDIO 范围，客户端运行状态未观察。');
           bindings.push(baseBinding({
             context, kind: 'mcp', name: serverName, scope: 'native', sourceKind: 'user',
             sourcePath: configPath, projectId: null, nativeKey: `mcp_servers.${serverName}`, enabled: state,
@@ -301,7 +301,7 @@ export const codexAdapter: AgentAdapter = {
             writable,
             readOnlyReason: writable ? null : !writableInstance
               ? 'Writing requires a manually registered writable instance or an isolated writable demo instance.'
-              : 'The TOML target table is not uniquely addressable.',
+              : 'TOML 目标表无法唯一定位。',
             diagnostics: reasons,
           }));
         }
@@ -343,7 +343,7 @@ export const codexAdapter: AgentAdapter = {
       const projectConfigPath = path.join(project.rootPath, '.codex', 'config.toml');
       const projectConfigPathSafe = !(await existsRegularFile(projectConfigPath)) || await isSafePathWithin(project.rootPath, projectConfigPath);
       if (!projectConfigPathSafe) {
-        diagnostics.push('Codex project config.toml crosses a symlink or junction and was skipped.');
+        diagnostics.push('Codex 项目 config.toml 跨越符号链接或 junction，已跳过。');
       } else {
         const projectParsed = await safeTomlFile(projectConfigPath, diagnostics, 'Codex project config.toml', (text) => {
           if (/\r(?!\n)/.test(text)) throw new Error('unsupported-line-ending');
@@ -356,14 +356,14 @@ export const codexAdapter: AgentAdapter = {
             for (const [serverName, raw] of Object.entries(projectServers)) {
               const server = object(raw);
               const enabled = server && server.enabled === undefined ? true : typeof server?.enabled === 'boolean' ? server.enabled : null;
-              const notes = server?.enabled === undefined ? ['Codex treats a missing enabled field as enabled by default.'] : [];
+              const notes = server?.enabled === undefined ? ['Codex 将缺失的 enabled 字段默认视为启用。'] : [];
               bindings.push(baseBinding({
                 context, kind: 'mcp', name: serverName, scope: 'project', sourceKind: 'repository',
                 sourcePath: projectConfigPath, projectId: project.id, nativeKey: `mcp_servers.${serverName}`, enabled,
                 origin: 'configuration', configurationSourcePath: projectConfigPath,
                 configurationKey: `mcp_servers.${serverName}`, configurationEnabled: enabled,
                 mcpTransport: mcpTransport(server),
-                diagnostics: notes, readOnlyReason: 'Project Codex MCP configuration is read-only in this iteration.',
+                diagnostics: notes, readOnlyReason: '项目级 Codex MCP 配置在本轮为只读。',
               }));
             }
           }
@@ -384,7 +384,7 @@ export const codexAdapter: AgentAdapter = {
       const parent = baseBinding({
         context, kind: 'plugin', name: pluginName, scope: 'native', sourceKind: 'plugin', sourcePath: pluginDir,
         projectId: null, nativeKey: `plugin-dir:${path.resolve(pluginDir)}`, origin: 'filesystem', cacheState: 'unknown',
-        readOnlyReason: 'Filesystem plugin activation is not modified by this adapter.',
+        readOnlyReason: '本适配器不修改文件系统插件的启用状态。',
       });
       bindings.push(parent);
       const skillsRoot = path.join(pluginDir, 'skills');

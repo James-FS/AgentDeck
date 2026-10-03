@@ -84,8 +84,8 @@ export function buildCapabilityEvidence(args: {
     result.push(evidence({
       area: 'static-scan', row, status: partialCoverage ? 'partial' : 'verified', readable: true, writable: false, reference,
       reason: partialCoverage
-        ? 'A bounded static scanner covers this declared source. Coverage is partial because official configuration semantics and other paths remain unverified.'
-        : 'The bounded adapter scan is implemented for this resource type, scope, and source. This does not establish that the client loaded it.',
+        ? '静态扫描覆盖该声明来源，但覆盖为部分：官方配置语义与其他候选路径尚未验证。'
+        : '适配器已实现该资源类型、范围与来源的有限静态扫描；这不代表客户端已加载该资源。',
     }));
     const codexUserMcp = args.agentId === 'codex' && row.kind === 'mcp' && row.scope === 'native' && row.sourceKind === 'user';
     const codexSkill = args.agentId === 'codex' && row.kind === 'skill' && row.scope === 'user-global' && row.sourceKind === 'user';
@@ -98,19 +98,19 @@ export function buildCapabilityEvidence(args: {
       operations: codexUserMcp || basicControl ? ['scan', 'toggle', 'restore'] : ['scan'],
       ...(codexUserMcp ? { controlScope: 'standalone-user-mcp' as const } : basicControl ? { controlScope: basicControl } : {}),
       reference: basicControl ? 'tests/codex-controls.test.ts' : codexUserMcp ? 'tests/adapters.test.ts; tests/change-engine.test.ts; tests/server.test.ts' : reference,
-      reason: basicControl ? 'Isolated tests cover config-root standalone Skill path overrides or configured local marketplace plugin identity toggles. Other sources remain read-only.' : codexUserMcp
-        ? 'Fixtures and isolated change-engine tests validate standalone user MCP scan, toggle, and restore behavior; native client loading is separate.'
+      reason: basicControl ? '隔离测试覆盖配置根独立 Skill 的按路径覆盖，以及已配置本地市场插件的身份级开关；其他来源保持只读。' : codexUserMcp
+        ? '夹具与隔离变更引擎测试验证了独立用户级 MCP 的扫描、启停与恢复；客户端原生加载行为另行验证。'
         : partialCoverage
-          ? 'Fixture tests cover a bounded portion of the declared static source; they do not establish official runtime semantics.'
-          : 'Fixture tests exercise the static adapter path for this declared resource type, scope, and source; native runtime behavior remains separate.',
+          ? '夹具测试仅覆盖声明静态来源的有限部分；不代表官方运行时语义。'
+          : '夹具测试针对该资源类型、范围与来源执行静态适配器路径；原生运行时行为另行验证。',
     }));
     const nativeVerified = isVerifiedNativeCodexMcp(args.agentId, args.versionEvidence, row);
     result.push(evidence({
       area: 'native-config', row, status: nativeVerified || basicNativeVerified ? 'verified' : 'unverified',
       readable: nativeVerified || basicNativeVerified, writable: (nativeVerified || basicNativeVerified) && args.optedInCodexWrite,
-      reason: basicNativeVerified ? 'Codex 0.159.2/win32 isolated native reread covers only standalone SKILL.md under the registered config-root skills directory or a configured local marketplace plugin identity. This is configuration evidence, not current-session runtime observation.' : nativeVerified
-        ? 'STDIO native configuration round-trip verified only for Codex 0.159.2 on win32 and standalone user MCP toggle/restore. This evidence never changes instance write policy.'
-        : 'Native configuration behavior has not been verified for this client, resource type, scope, and source combination.',
+      reason: basicNativeVerified ? 'Codex 0.159.2 / Windows 的隔离原生复读仅覆盖已登记配置根 skills 目录下的独立 SKILL.md，以及已配置本地市场插件身份；这是配置证据，不代表当前会话运行状态。' : nativeVerified
+        ? 'STDIO 原生配置往返仅在 Codex 0.159.2 / Windows 的用户级独立 MCP 启停与恢复上验收；该证据不改变实例写入策略。'
+        : '该客户端、资源类型、范围与来源组合的原生配置行为尚未验证。',
       ...(nativeVerified ? { controlScope: 'standalone-user-mcp' as const } : basicControl ? { controlScope: basicControl } : {}),
       ...(nativeVerified ? { mcpTransport: 'stdio' as const } : {}),
       ...(nativeVerified || basicNativeVerified ? {
@@ -120,7 +120,7 @@ export function buildCapabilityEvidence(args: {
     }));
     result.push(evidence({
       area: 'runtime', row, status: 'unverified', readable: false, writable: false,
-      reason: 'AgentDeck has not observed whether the client loaded or is currently running this resource.',
+      reason: 'AgentDeck 未观察客户端是否已加载或正在运行该资源。',
     }));
   }
   return result;

@@ -38,7 +38,7 @@ function addMcpEntries(args: {
       configurationEnabled: enabled, cacheState: 'unknown',
       mcpTransport: mcpTransport(server),
       diagnostics: server ? [] : [`${args.label} entry is not a static object.`],
-      readOnlyReason: 'Claude Code MCP configuration is read-only in this iteration.',
+      readOnlyReason: 'Claude Code MCP 配置在本轮为只读。',
     }));
   }
   return result;
@@ -90,8 +90,8 @@ function addClaudePluginConfiguration(args: {
     ...(args.version ? { pluginVersion: args.version } : {}),
     configurationSourcePath: args.sourcePath, configurationKey: args.key,
     configurationEnabled: args.enabled, cacheState: args.cacheState,
-    diagnostics: [...(parts ? [] : ['Plugin identity does not contain an exact name@marketplace pair.']), ...(args.diagnostics ?? [])],
-    readOnlyReason: 'Claude Code plugin activation is read-only in this iteration.',
+    diagnostics: [...(parts ? [] : ['插件身份不包含精确的 name@marketplace 组合。']), ...(args.diagnostics ?? [])],
+    readOnlyReason: 'Claude Code 插件启用状态在本轮为只读。',
   });
   args.bindings.push(parent);
   return parent;
@@ -126,7 +126,7 @@ async function scanClaudePlugins(args: {
     const entries = await directDirectories(directory, args.diagnostics, 'Claude plugin cache directory');
     const remaining = Math.max(0, MAX_CLAUDE_PLUGIN_DIRECTORY_ENTRIES - entriesScanned);
     entriesScanned += Math.min(entries.length, remaining);
-    if (entries.length > remaining) args.diagnostics.push('Claude plugin cache directory scan reached its bounded entry limit.');
+    if (entries.length > remaining) args.diagnostics.push('Claude 插件缓存目录扫描达到条目上限。');
     return entries.slice(0, remaining);
   };
   if (await isSafePathWithin(root, cacheRoot)) {
@@ -138,7 +138,7 @@ async function scanClaudePlugins(args: {
         if (pluginFolder.startsWith('.') || !(await isSafePathWithin(root, pluginDir))) continue;
         for (const versionDir of await readDirectories(pluginDir)) {
           if (++packageCount > MAX_CLAUDE_PLUGIN_PACKAGES) {
-            args.diagnostics.push('Claude plugin cache package scan reached its bounded package limit.');
+            args.diagnostics.push('Claude 插件缓存包扫描达到包数上限。');
             break cacheScan;
           }
           if (!(await isSafePathWithin(root, versionDir))) continue;
@@ -166,10 +166,10 @@ async function scanClaudePlugins(args: {
             } : { configurationEnabled: null }),
             cacheState: 'present',
             diagnostics: [
-              ...(nameMismatch ? ['Plugin manifest name does not match its cache directory identity; configuration association was withheld.'] : []),
+              ...(nameMismatch ? ['插件 manifest 名称与缓存目录身份不一致，已撤销配置关联。'] : []),
               ...(!nameMismatch && !configuration ? ['This cached plugin version has no exact matching user enabledPlugins identity.'] : []),
             ],
-            readOnlyReason: 'A cached plugin version is read-only; runtime selection cannot be inferred from cache contents.',
+            readOnlyReason: '缓存插件版本只读；无法从缓存内容推断当前运行版本。',
           });
           bindings.push(parent);
           if (nameMismatch) cacheIdentityConflicts.add(`${identity}\0${version}`);
@@ -178,18 +178,18 @@ async function scanClaudePlugins(args: {
           let skillDeclarations: string[] = ['./skills'];
           if (typeof manifest.skills === 'string') skillDeclarations = [manifest.skills];
           else if (Array.isArray(manifest.skills)) skillDeclarations = manifest.skills.filter((value): value is string => typeof value === 'string').slice(0, 20);
-          else if (manifest.skills !== undefined) args.diagnostics.push('Claude plugin Skills declaration has an unsupported shape.');
+          else if (manifest.skills !== undefined) args.diagnostics.push('Claude 插件 Skills 声明结构不受支持。');
           const seen = new Set<string>();
           for (const declaration of skillDeclarations) {
             const skillRoot = declaredPath(versionDir, declaration);
             if (!skillRoot) {
-              args.diagnostics.push('Claude plugin Skill declaration escapes or is not a relative path inside its package.');
+              args.diagnostics.push('Claude 插件 Skill 声明越界或不是包内相对路径。');
               continue;
             }
             if (seen.has(skillRoot)) continue;
             seen.add(skillRoot);
             if (!(await isSafePathWithin(root, skillRoot))) {
-              if (await existsDirectory(skillRoot)) args.diagnostics.push('Claude plugin Skill declaration crosses a symlink or junction and was skipped.');
+              if (await existsDirectory(skillRoot)) args.diagnostics.push('Claude 插件 Skill 声明跨越符号链接或 junction，已跳过。');
               continue;
             }
             const childMetadata = {
@@ -207,7 +207,7 @@ async function scanClaudePlugins(args: {
                 configurationEnabled: configuration?.enabled ?? null, cacheState: 'present', diagnostics: args.diagnostics,
               });
               bindings.push(...children.slice(0, MAX_CLAUDE_PLUGIN_SKILLS));
-              if (children.length > MAX_CLAUDE_PLUGIN_SKILLS) args.diagnostics.push('A Claude plugin Skills root exceeded its bounded child limit.');
+              if (children.length > MAX_CLAUDE_PLUGIN_SKILLS) args.diagnostics.push('某个 Claude 插件 Skills 根超过子项上限。');
             }
           }
 
@@ -217,10 +217,10 @@ async function scanClaudePlugins(args: {
           if (typeof mcpDeclaration === 'string') {
             const mcpPath = declaredPath(versionDir, mcpDeclaration);
             if (!mcpPath) {
-              args.diagnostics.push('Claude plugin MCP declaration escapes or is not a relative path inside its package.');
+              args.diagnostics.push('Claude 插件 MCP 声明越界或不是包内相对路径。');
               serverValues = null;
             } else if (!(await isSafePathWithin(root, mcpPath))) {
-              if (await existsRegularFile(mcpPath)) args.diagnostics.push('Claude plugin MCP declaration crosses a symlink or junction and was skipped.');
+              if (await existsRegularFile(mcpPath)) args.diagnostics.push('Claude 插件 MCP 声明跨越符号链接或 junction，已跳过。');
               serverValues = null;
             } else {
               mcpSource = mcpPath;
@@ -250,14 +250,14 @@ async function scanClaudePlugins(args: {
                 mcpTransport: mcpTransport(rawServer),
                 cacheState: 'present',
                 diagnostics: [
-                  ...(configuration?.enabled === false ? ['Disabled by the parent plugin configuration.'] : []),
-                  ...(invalidLocalState ? ['The plugin MCP enabled field is not a static boolean.'] : []),
-                  ...(configuration?.enabled == null && hasLocalEnabled ? ['A child enabled value cannot establish effective state without an enabled parent plugin identity.'] : []),
+                  ...(configuration?.enabled === false ? ['已由父插件配置停用。'] : []),
+                  ...(invalidLocalState ? ['插件 MCP 的 enabled 字段不是静态布尔值。'] : []),
+                  ...(configuration?.enabled == null && hasLocalEnabled ? ['没有已启用的父插件身份时，子级 enabled 值不能确定生效状态。'] : []),
                 ],
-                readOnlyReason: 'MCP servers bundled with a cached plugin cannot be changed independently.',
+                readOnlyReason: '插件缓存附带的 MCP 不能独立修改。',
               }));
             }
-            if (Object.keys(childServers).length > MAX_CLAUDE_PLUGIN_MCP_SERVERS) args.diagnostics.push('A Claude plugin MCP manifest exceeded its bounded child limit.');
+            if (Object.keys(childServers).length > MAX_CLAUDE_PLUGIN_MCP_SERVERS) args.diagnostics.push('某个 Claude 插件 MCP 清单超过子项上限。');
           }
         }
       }
@@ -275,7 +275,7 @@ async function scanClaudePlugins(args: {
       if (!parts || !Array.isArray(rawRecords)) continue;
       for (const [index, rawRecord] of rawRecords.slice(0, 20).entries()) {
         if (++registrationCount > 300) {
-          args.diagnostics.push('Claude installed plugin registry reached its bounded registration limit.');
+          args.diagnostics.push('Claude 已安装插件登记达到登记数上限。');
           break;
         }
         const record = object(rawRecord);
@@ -301,8 +301,8 @@ async function scanClaudePlugins(args: {
         const configuration = recordProjectId === null ? userConfigs.get(identity) : undefined;
         const registrationKey = `plugins[${JSON.stringify(identity)}][${index}]`;
         const registrationDiagnostics = [
-          ...(!pathMatches ? ['Installed plugin registration does not point to the matching in-root cache version.'] : []),
-          ...(cacheIdentityConflicts.has(packageKey) ? ['Plugin manifest name conflicts with the installed plugin identity.'] : []),
+          ...(!pathMatches ? ['已安装插件登记没有指向配置根内匹配的缓存版本。'] : []),
+          ...(cacheIdentityConflicts.has(packageKey) ? ['插件 manifest 名称与已安装插件身份冲突。'] : []),
           ...(pathMatches && !manifestPresent ? ['Installed plugin registration points to a cache version with no readable plugin manifest.'] : []),
         ];
         addClaudePluginConfiguration({
@@ -384,12 +384,12 @@ async function scanClaudeFilesystemPlugins(context: ScanContext, diagnostics: st
     let declarations: string[] = ['./skills'];
     if (typeof manifest.skills === 'string') declarations = [manifest.skills];
     else if (Array.isArray(manifest.skills)) declarations = manifest.skills.filter((item): item is string => typeof item === 'string').slice(0, 20);
-    else if (manifest.skills !== undefined) diagnostics.push('Claude filesystem plugin Skills declaration has an unsupported shape.');
+    else if (manifest.skills !== undefined) diagnostics.push('Claude 文件系统插件 Skills 声明结构不受支持。');
     for (const declaration of new Set(declarations)) {
       const skillRoot = declaredPath(dir, declaration);
-      if (!skillRoot) { diagnostics.push('Claude filesystem plugin Skill declaration escapes or is not a relative path inside its package.'); continue; }
+      if (!skillRoot) { diagnostics.push('Claude 文件系统插件 Skill 声明越界或不是包内相对路径。'); continue; }
       if (!(await isSafePathWithin(root, skillRoot))) {
-        if (await existsDirectory(skillRoot)) diagnostics.push('Claude filesystem plugin Skill declaration crosses a symlink or junction and was skipped.');
+        if (await existsDirectory(skillRoot)) diagnostics.push('Claude 文件系统插件 Skill 声明跨越符号链接或 junction，已跳过。');
         continue;
       }
       if (await existsRegularFile(path.join(skillRoot, 'SKILL.md')) || await existsRegularFile(path.join(skillRoot, 'skill.md'))) {
@@ -400,7 +400,7 @@ async function scanClaudeFilesystemPlugins(context: ScanContext, diagnostics: st
           projectId: null, origin: 'filesystem', cacheState: 'unknown', diagnostics,
         });
         bindings.push(...children.slice(0, MAX_CLAUDE_PLUGIN_SKILLS));
-        if (children.length > MAX_CLAUDE_PLUGIN_SKILLS) diagnostics.push('A Claude filesystem plugin Skills root exceeded its bounded child limit.');
+        if (children.length > MAX_CLAUDE_PLUGIN_SKILLS) diagnostics.push('某个 Claude 文件系统插件 Skills 根超过子项上限。');
       }
     }
 
@@ -410,10 +410,10 @@ async function scanClaudeFilesystemPlugins(context: ScanContext, diagnostics: st
     if (typeof declaredMcp === 'string') {
       const mcpPath = declaredPath(dir, declaredMcp);
       if (!mcpPath) {
-        diagnostics.push('Claude filesystem plugin MCP declaration escapes or is not a relative path inside its package.');
+        diagnostics.push('Claude 文件系统插件 MCP 声明越界或不是包内相对路径。');
         serverValues = null;
       } else if (!(await isSafePathWithin(root, mcpPath))) {
-        if (await existsRegularFile(mcpPath)) diagnostics.push('Claude filesystem plugin MCP declaration crosses a symlink or junction and was skipped.');
+        if (await existsRegularFile(mcpPath)) diagnostics.push('Claude 文件系统插件 MCP 声明跨越符号链接或 junction，已跳过。');
         serverValues = null;
       } else {
         mcpSource = mcpPath;
@@ -440,13 +440,13 @@ async function scanClaudeFilesystemPlugins(context: ScanContext, diagnostics: st
           configurationEnabled: null, cacheState: 'unknown',
           mcpTransport: mcpTransport(raw),
           diagnostics: [
-            ...(explicitEnabled ? ['A bundled server flag does not establish the parent plugin configuration or runtime state.'] : []),
+            ...(explicitEnabled ? ['包内服务器标记不能确定父插件配置或运行状态。'] : []),
             'No exact name@marketplace configuration identity was available for this filesystem plugin.',
           ],
-          readOnlyReason: 'MCP servers bundled with a filesystem plugin cannot be changed independently.',
+          readOnlyReason: '文件系统插件附带的 MCP 不能独立修改。',
         }));
       }
-      if (Object.keys(servers).length > MAX_CLAUDE_PLUGIN_MCP_SERVERS) diagnostics.push('A Claude filesystem plugin MCP manifest exceeded its bounded child limit.');
+      if (Object.keys(servers).length > MAX_CLAUDE_PLUGIN_MCP_SERVERS) diagnostics.push('某个 Claude 文件系统插件 MCP 清单超过子项上限。');
     }
   }
   return bindings;
@@ -462,7 +462,7 @@ export const claudeCodeAdapter: AgentAdapter = {
   id: 'claude-code',
   name: 'Claude Code',
   info: {
-    id: 'claude-code', name: 'Claude Code', description: 'Read-only bounded scan of Claude Code Skills, plugin metadata, and MCP configuration.',
+    id: 'claude-code', name: 'Claude Code', description: '对 Claude Code Skills、插件元数据与 MCP 配置的只读有限扫描。',
     supportedKinds: ['skill', 'plugin', 'mcp'], writeSupport: [],
   },
   async discover({ homeDir, env }): Promise<AgentInstance[]> {
@@ -493,14 +493,14 @@ export const claudeCodeAdapter: AgentAdapter = {
 
     const userSettingsPath = path.join(root, 'settings.json');
     const userSettingsSafe = !(await existsRegularFile(userSettingsPath)) || await isSafePathWithin(root, userSettingsPath);
-    if (!userSettingsSafe) diagnostics.push('Claude user settings cross a symlink or junction and were skipped.');
+    if (!userSettingsSafe) diagnostics.push('Claude 用户设置跨越符号链接或 junction，已跳过。');
     const userSettings = userSettingsSafe ? await readSettings(userSettingsPath, diagnostics, 'Claude user settings') : null;
     const projectSettingsPath = context.project ? path.join(context.project.rootPath, '.claude', 'settings.json') : '';
     const localSettingsPath = context.project ? path.join(context.project.rootPath, '.claude', 'settings.local.json') : '';
     const projectSettingsSafe = !projectSettingsPath || !(await existsRegularFile(projectSettingsPath)) || await isSafePathWithin(context.project!.rootPath, projectSettingsPath);
     const localSettingsSafe = !localSettingsPath || !(await existsRegularFile(localSettingsPath)) || await isSafePathWithin(context.project!.rootPath, localSettingsPath);
-    if (!projectSettingsSafe) diagnostics.push('Claude project settings cross a symlink or junction and were skipped.');
-    if (!localSettingsSafe) diagnostics.push('Claude local project settings cross a symlink or junction and were skipped.');
+    if (!projectSettingsSafe) diagnostics.push('Claude 项目设置跨越符号链接或 junction，已跳过。');
+    if (!localSettingsSafe) diagnostics.push('Claude 本地项目设置跨越符号链接或 junction，已跳过。');
     const projectSettings = projectSettingsSafe && projectSettingsPath ? await readSettings(projectSettingsPath, diagnostics, 'Claude project settings') : null;
     const localSettings = localSettingsSafe && localSettingsPath ? await readSettings(localSettingsPath, diagnostics, 'Claude local project settings') : null;
     const projectOverrideSettings = { ...(projectSettings ?? {}), ...(localSettings ?? {}) };
@@ -527,7 +527,7 @@ export const claudeCodeAdapter: AgentAdapter = {
             binding.configurationEnabled = state;
             binding.configurationSourcePath = source.sourcePath;
             binding.configurationKey = `skillOverrides.${name}`;
-            binding.diagnostics.push('Effective state comes from a Claude Code name-level Skill override.');
+            binding.diagnostics.push('生效状态来自 Claude Code 的名字级 Skill 覆盖。');
           }
           continue;
         }
@@ -536,21 +536,21 @@ export const claudeCodeAdapter: AgentAdapter = {
           projectId: source.projectId, nativeKey: `skillOverrides.${name}`, enabled: state,
           origin: 'configuration', configurationSourcePath: source.sourcePath,
           configurationKey: `skillOverrides.${name}`, configurationEnabled: state,
-          diagnostics: ['This is a name-level override and may affect multiple same-named Skills.'],
-          readOnlyReason: 'Claude Code Skill overrides are not enabled for writing before version validation.',
+          diagnostics: ['这是名字级覆盖，可能影响多个同名 Skill。'],
+          readOnlyReason: '版本验证前，Claude Code Skill 覆盖未开放写入。',
         }));
       }
     }
 
     const userMcpPath = path.join(homeDir, '.claude.json');
     const userMcpSafe = !(await existsRegularFile(userMcpPath)) || await isSafePathWithin(homeDir, userMcpPath);
-    if (!userMcpSafe) diagnostics.push('Claude user MCP state crosses a symlink or junction and was skipped.');
+    if (!userMcpSafe) diagnostics.push('Claude 用户 MCP 状态跨越符号链接或 junction，已跳过。');
     const userState = userMcpSafe ? await safeMcpFile<unknown>(userMcpPath, diagnostics, 'Claude user MCP state') : null;
     bindings.push(...addMcpEntries({ context, file: userMcpPath, entries: object(userState)?.mcpServers, sourceKind: 'user', diagnostics, label: 'User MCP' }));
     if (context.project) {
       const projectMcpPath = path.join(context.project.rootPath, '.mcp.json');
       const projectMcpSafe = !(await existsRegularFile(projectMcpPath)) || await isSafePathWithin(context.project.rootPath, projectMcpPath);
-      if (!projectMcpSafe) diagnostics.push('Claude project MCP config crosses a symlink or junction and was skipped.');
+      if (!projectMcpSafe) diagnostics.push('Claude 项目 MCP 配置跨越符号链接或 junction，已跳过。');
       const projectConfig = projectMcpSafe ? await safeMcpFile<unknown>(projectMcpPath, diagnostics, 'Claude project MCP config') : null;
       bindings.push(...addMcpEntries({ context, file: projectMcpPath, entries: object(projectConfig)?.mcpServers, sourceKind: 'repository', diagnostics, label: 'Project MCP' }));
     }

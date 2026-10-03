@@ -243,7 +243,7 @@ export function editCodexEnabled(original: string, serverName: string, desired: 
   return editSection(original, targetHeader, previousEnabled, desired, text => {
     const result = TOML.parse(parserView(text)) as Record<string, unknown>;
     const entries = result[section] as Record<string, Record<string, unknown>>;
-    if (entries?.[name]?.enabled !== desired) invalid('The edited Codex table did not preserve the requested state.');
+    if (entries?.[name]?.enabled !== desired) invalid('编辑后的 Codex 表未保留请求的状态。');
   });
 }
 

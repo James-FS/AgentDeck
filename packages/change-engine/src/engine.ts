@@ -83,20 +83,20 @@ function decodeUtf8(bytes: Buffer): string {
   const hasBom = bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
   const payload = hasBom ? bytes.subarray(3) : bytes;
   const text = payload.toString('utf8');
-  if (!Buffer.from(text, 'utf8').equals(payload)) fail('INVALID_CONFIG', 'The Codex TOML file is not valid UTF-8.');
+  if (!Buffer.from(text, 'utf8').equals(payload)) fail('INVALID_CONFIG', 'Codex TOML 文件不是有效的 UTF-8。');
   return `${hasBom ? '\uFEFF' : ''}${text}`;
 }
 
 async function readConfig(configPath: string): Promise<Buffer> {
   try {
     const info = await lstat(configPath);
-    if (!info.isFile() || info.size > 1024 * 1024) fail('INVALID_CONFIG', 'The Codex TOML target is not a regular file within the size limit.');
+    if (!info.isFile() || info.size > 1024 * 1024) fail('INVALID_CONFIG', 'Codex TOML 目标不是限内常规文件。');
     const bytes = await readFile(configPath);
-    if (bytes.byteLength > 1024 * 1024) fail('INVALID_CONFIG', 'The Codex TOML target exceeds the size limit.');
+    if (bytes.byteLength > 1024 * 1024) fail('INVALID_CONFIG', 'Codex TOML 目标超出大小上限。');
     return bytes;
   } catch (error) {
     if (error instanceof ChangeEngineError) throw error;
-    fail('IO_ERROR', 'The Codex TOML target could not be read.');
+    fail('IO_ERROR', '无法读取 Codex TOML 目标。');
   }
 }
 
@@ -118,15 +118,15 @@ async function capturePathIdentity(targetPath: string): Promise<PathIdentity> {
       current = path.join(current, parts[index] ?? '');
       const info = await lstat(current);
       const symbolicLink = info.isSymbolicLink();
-      if (index < parts.length - 1 && !symbolicLink && !info.isDirectory()) fail('PATH_CHANGED', 'The target path structure changed after planning.');
-      if (index === parts.length - 1 && (symbolicLink || !info.isFile())) fail('PATH_CHANGED', 'The target file identity is not a regular file.');
+      if (index < parts.length - 1 && !symbolicLink && !info.isDirectory()) fail('PATH_CHANGED', '计划生成后目标路径结构发生变化。');
+      if (index === parts.length - 1 && (symbolicLink || !info.isFile())) fail('PATH_CHANGED', '目标文件身份不是常规文件。');
       const linkTarget = symbolicLink ? await readlink(current) : null;
       entries.push({ path: current, realPath: await realpath(current), dev: info.dev, ino: info.ino, symbolicLink, linkTarget });
     }
     return { realPath: await realpath(absolute), entries };
   } catch (error) {
     if (error instanceof ChangeEngineError) throw error;
-    fail('PATH_CHANGED', 'The target path could not be resolved safely.');
+    fail('PATH_CHANGED', '无法安全解析目标路径。');
   }
 }
 
@@ -156,19 +156,19 @@ async function ensureDataDir(dataDir: string): Promise<string> {
   try {
     await mkdir(absolute, { recursive: true, mode: 0o700 });
     return await realpath(absolute);
-  } catch { fail('IO_ERROR', 'The AgentDeck data directory is unavailable.'); }
+  } catch { fail('IO_ERROR', 'AgentDeck 数据目录不可用。'); }
 }
 
 async function ensurePrivateDirectory(dir: string): Promise<void> {
   try {
     await mkdir(dir, { recursive: true, mode: 0o700 });
     if (process.platform !== 'win32') await chmod(dir, 0o700);
-  } catch { fail('IO_ERROR', 'The AgentDeck operation storage could not be created.'); }
+  } catch { fail('IO_ERROR', '无法创建 AgentDeck 操作存储。'); }
 }
 
 async function assertWithinDataDir(dataRoot: string, candidate: string): Promise<void> {
   const rel = path.relative(dataRoot, path.resolve(candidate));
-  if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) fail('IO_ERROR', 'The backup path is outside the AgentDeck data directory.');
+  if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) fail('IO_ERROR', '备份路径在 AgentDeck 数据目录之外。');
 }
 
 async function writeExclusive(file: string, bytes: Buffer | string, mode = 0o600): Promise<void> {
@@ -176,7 +176,7 @@ async function writeExclusive(file: string, bytes: Buffer | string, mode = 0o600
     const handle = await open(file, 'wx', mode);
     try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
     if (process.platform !== 'win32') await chmod(file, mode);
-  } catch { fail('IO_ERROR', 'AgentDeck could not persist the protected operation data.'); }
+  } catch { fail('IO_ERROR', 'AgentDeck 无法保存受保护的操作数据。'); }
 }
 
 async function writeJsonAtomic(file: string, value: unknown): Promise<void> {
@@ -189,7 +189,7 @@ async function writeJsonAtomic(file: string, value: unknown): Promise<void> {
   } catch (error) {
     await rm(temp, { force: true }).catch(() => undefined);
     if (error instanceof ChangeEngineError) throw error;
-    fail('IO_ERROR', 'AgentDeck could not update the protected operation journal.');
+    fail('IO_ERROR', 'AgentDeck 无法更新受保护的操作日志。');
   }
 }
 
@@ -234,31 +234,31 @@ async function acquireTargetLock(identity: PathIdentity): Promise<TargetLock> {
         },
       };
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') fail('IO_ERROR', 'The target directory cannot host an AgentDeck write lock.');
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') fail('IO_ERROR', '目标目录无法承载 AgentDeck 写锁。');
       const prior = await staleLockPid(lockFile);
-      if (!prior.stale || !prior.contents) fail('LOCKED', 'Another AgentDeck operation holds the target lock.');
+      if (!prior.stale || !prior.contents) fail('LOCKED', '另一个 AgentDeck 操作持有目标锁。');
       try {
         const current = await readFile(lockFile);
-        if (!current.equals(prior.contents)) fail('LOCKED', 'The target lock changed while being checked.');
+        if (!current.equals(prior.contents)) fail('LOCKED', '检查期间目标锁发生变化。');
         await rm(lockFile);
       } catch (inner) {
         if (inner instanceof ChangeEngineError) throw inner;
-        fail('LOCKED', 'The stale target lock could not be cleared safely.');
+        fail('LOCKED', '无法安全清除过期的目标锁。');
       }
     }
   }
-  fail('LOCKED', 'Another AgentDeck operation holds the target lock.');
+  fail('LOCKED', '另一个 AgentDeck 操作持有目标锁。');
 }
 
 async function assertCurrentPrepared(prepared: PreparedChange): Promise<Buffer> {
   if (sha256(prepared.private.originalBytes) !== prepared.plan.beforeHash
     || sha256(prepared.private.updatedBytes) !== prepared.plan.afterHash) {
-    fail('CONFIG_CHANGED', 'The protected plan contents no longer match their recorded digests.');
+    fail('CONFIG_CHANGED', '受保护计划内容与记录摘要不一致。');
   }
   const currentIdentity = await capturePathIdentity(prepared.private.configPath);
-  if (!sameIdentity(prepared.private.pathIdentity, currentIdentity)) fail('PATH_CHANGED', 'The target path identity changed after planning.');
+  if (!sameIdentity(prepared.private.pathIdentity, currentIdentity)) fail('PATH_CHANGED', '计划生成后目标路径身份发生变化。');
   const current = await readConfig(prepared.private.configPath);
-  if (sha256(current) !== prepared.plan.beforeHash) fail('CONFIG_CHANGED', 'The Codex configuration changed after planning.');
+  if (sha256(current) !== prepared.plan.beforeHash) fail('CONFIG_CHANGED', '计划生成后 Codex 配置发生变化。');
   return current;
 }
 
@@ -276,16 +276,16 @@ async function readSnapshot(root: string, snapshot: string, expectedHash: string
   await assertWithinDataDir(root, snapshot);
   try {
     const info = await lstat(snapshot);
-    if (!info.isFile() || info.size > 1024 * 1024) fail('RECOVERY_CONFLICT', 'The recovery snapshot is missing or invalid.');
+    if (!info.isFile() || info.size > 1024 * 1024) fail('RECOVERY_CONFLICT', '恢复快照缺失或无效。');
     const canonicalSnapshot = await realpath(snapshot);
     const canonicalRel = path.relative(root, canonicalSnapshot);
-    if (canonicalRel === '..' || canonicalRel.startsWith(`..${path.sep}`) || path.isAbsolute(canonicalRel)) fail('RECOVERY_CONFLICT', 'The recovery snapshot resolves outside the AgentDeck data directory.');
+    if (canonicalRel === '..' || canonicalRel.startsWith(`..${path.sep}`) || path.isAbsolute(canonicalRel)) fail('RECOVERY_CONFLICT', '恢复快照解析到 AgentDeck 数据目录之外。');
     const bytes = await readFile(snapshot);
-    if (sha256(bytes) !== expectedHash) fail('RECOVERY_CONFLICT', 'The recovery snapshot digest does not match its journal.');
+    if (sha256(bytes) !== expectedHash) fail('RECOVERY_CONFLICT', '恢复快照摘要与日志不一致。');
     return bytes;
   } catch (error) {
     if (error instanceof ChangeEngineError) throw error;
-    fail('RECOVERY_CONFLICT', 'The recovery snapshot is missing or invalid.');
+    fail('RECOVERY_CONFLICT', '恢复快照缺失或无效。');
   }
 }
 
@@ -306,7 +306,7 @@ async function atomicReplaceTarget(
 
     const tempStat = await stat(temp);
     const finalEntry = identity.entries[identity.entries.length - 1];
-    if (!finalEntry) fail('PATH_CHANGED', 'The target file identity is incomplete.');
+    if (!finalEntry) fail('PATH_CHANGED', '目标文件身份不完整。');
     const expectedAfter: PathIdentity = {
       realPath: identity.realPath,
       entries: identity.entries.map((entry, index) => index === identity.entries.length - 1
@@ -316,9 +316,9 @@ async function atomicReplaceTarget(
     await beforeRename(temp, expectedAfter);
 
     const currentIdentity = await capturePathIdentity(configPath);
-    if (!sameIdentity(identity, currentIdentity)) fail('PATH_CHANGED', 'The target path identity changed before replacement.');
+    if (!sameIdentity(identity, currentIdentity)) fail('PATH_CHANGED', '替换前目标路径身份发生变化。');
     const current = await readConfig(configPath);
-    if (sha256(current) !== sha256(original)) fail('CONFIG_CHANGED', 'The Codex configuration changed immediately before replacement.');
+    if (sha256(current) !== sha256(original)) fail('CONFIG_CHANGED', '替换前一刻 Codex 配置发生变化。');
     await rename(temp, configPath);
     try {
       const directory = await open(path.dirname(configPath), 'r');
@@ -327,7 +327,7 @@ async function atomicReplaceTarget(
   } catch (error) {
     await rm(temp, { force: true }).catch(() => undefined);
     if (error instanceof ChangeEngineError) throw error;
-    fail('IO_ERROR', 'AgentDeck could not atomically replace the Codex TOML file.');
+    fail('IO_ERROR', 'AgentDeck 无法原子替换 Codex TOML 文件。');
   }
 }
 
@@ -353,7 +353,7 @@ function planFor(args: {
 }
 
 export async function prepareToggle(input: PrepareToggleInput): Promise<PreparedChange> {
-  if (!input.serverName.trim()) fail('AMBIGUOUS_TARGET', 'The requested independent MCP server name is empty.');
+  if (!input.serverName.trim()) fail('AMBIGUOUS_TARGET', '请求的独立 MCP 服务器名为空。');
   const configPath = path.resolve(input.configPath);
   const originalBytes = await readConfig(configPath);
   const original = decodeUtf8(originalBytes);
@@ -365,7 +365,7 @@ export async function prepareToggle(input: PrepareToggleInput): Promise<Prepared
   const identity = await capturePathIdentity(configPath);
   const plan = planFor({
     configPath, beforeHash, afterHash,
-    diff: afterHash === beforeHash ? 'The resource already has the requested enabled state.'
+    diff: afterHash === beforeHash ? '资源已处于请求的启用状态。'
       : `${targetLabel(input.serverName, input.target)}\n- enabled = ${edited.hadEnabledField ? String(edited.previousEnabled) : 'missing (default/override not set)'}\n+ enabled = ${String(input.enabled)}`,
     desiredEnabled: input.enabled, now, ttlMs: input.ttlMs ?? DEFAULT_TTL_MS,
   });
@@ -381,7 +381,7 @@ export async function prepareToggle(input: PrepareToggleInput): Promise<Prepared
 
 export async function applyPrepared(prepared: PreparedChange, options: EngineOptions): Promise<AppliedChange> {
   const now = safeNow(options.now);
-  if (prepared.plan.status !== 'ready' || Date.parse(prepared.plan.expiresAt) <= now.getTime()) fail('PLAN_EXPIRED', 'The prepared change is expired or no longer ready.');
+  if (prepared.plan.status !== 'ready' || Date.parse(prepared.plan.expiresAt) <= now.getTime()) fail('PLAN_EXPIRED', '已准备的变更已过期或不可用。');
   const initialBytes = await assertCurrentPrepared(prepared);
   const root = await ensureDataDir(options.dataDir);
   const lock = await acquireTargetLock(prepared.private.pathIdentity);
@@ -415,7 +415,7 @@ export async function applyPrepared(prepared: PreparedChange, options: EngineOpt
       });
     }
     const finalBytes = await readConfig(prepared.private.configPath);
-    if (sha256(finalBytes) !== prepared.plan.afterHash) fail('CONFIG_CHANGED', 'The target content changed while the plan was being applied.');
+    if (sha256(finalBytes) !== prepared.plan.afterHash) fail('CONFIG_CHANGED', '应用计划期间目标内容发生变化。');
     const appliedIdentity = await capturePathIdentity(prepared.private.configPath);
     const appliedPlan: ChangePlan = { ...prepared.plan, status: 'applied' };
     const succeeded: Operation = { ...operation, status: 'succeeded', backupId: snapshotPath ? operationId : null };
@@ -447,7 +447,7 @@ export async function applyPrepared(prepared: PreparedChange, options: EngineOpt
       }
       throw error;
     }
-    fail('IO_ERROR', 'AgentDeck could not finish the prepared file change.');
+    fail('IO_ERROR', 'AgentDeck 无法完成已准备的文件变更。');
   } finally {
     await lock.release();
   }
@@ -455,20 +455,20 @@ export async function applyPrepared(prepared: PreparedChange, options: EngineOpt
 
 export async function prepareRestore(input: { operationId: string; dataDir: string; now?: Date; ttlMs?: number }): Promise<PreparedChange> {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.operationId)) {
-    fail('RECOVERY_CONFLICT', 'The requested operation identity is invalid.');
+    fail('RECOVERY_CONFLICT', '请求的操作身份无效。');
   }
   const root = await ensureDataDir(input.dataDir);
   const recordPath = dataPath(root, 'operations', `${input.operationId}.json`);
   const record = await readJson<AppliedRecord>(recordPath);
   if (!record || record.schemaVersion !== 1 || record.operation.status !== 'succeeded' || !record.snapshotPath) {
-    fail('RECOVERY_CONFLICT', 'This operation has no verified recovery snapshot.');
+    fail('RECOVERY_CONFLICT', '该操作没有已验证的恢复快照。');
   }
   const snapshot = await readSnapshot(root, record.snapshotPath, record.beforeHash);
   const previousDocument = editCodexEnabled(decodeUtf8(snapshot), record.serverName, record.desiredEnabled ?? true, record.target);
   const currentIdentity = await capturePathIdentity(record.configPath);
-  if (!sameIdentity(record.appliedIdentity, currentIdentity)) fail('PATH_CHANGED', 'The target path identity changed after the operation.');
+  if (!sameIdentity(record.appliedIdentity, currentIdentity)) fail('PATH_CHANGED', '操作之后目标路径身份发生变化。');
   const current = await readConfig(record.configPath);
-  if (sha256(current) !== record.afterHash) fail('RECOVERY_CONFLICT', 'The target changed after the operation; restoration would overwrite an external edit.');
+  if (sha256(current) !== record.afterHash) fail('RECOVERY_CONFLICT', '操作之后目标发生变化；恢复将覆盖外部编辑。');
   const now = safeNow(input.now);
   const plan = planFor({
     configPath: record.configPath, beforeHash: record.afterHash, afterHash: record.beforeHash,
@@ -592,14 +592,14 @@ export async function recoverIncomplete(options: { dataDir: string }): Promise<R
     const journal = await readJson<JournalRecord>(file);
     if (!journal || journal.schemaVersion !== 1) {
       diagnostics.push('An unreadable journal entry was retained for manual review.');
-      items.push({ operationId: path.basename(name, '.json'), status: 'ignored', message: 'Journal format was invalid.' });
+      items.push({ operationId: path.basename(name, '.json'), status: 'ignored', message: '日志格式无效。' });
       continue;
     }
     const filenameOperationId = path.basename(name, '.json');
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(filenameOperationId)
       || journal.operationId !== filenameOperationId) {
       diagnostics.push('A journal identity did not match its storage filename.');
-      items.push({ operationId: filenameOperationId, status: 'ignored', message: 'Journal identity could not be verified.' });
+      items.push({ operationId: filenameOperationId, status: 'ignored', message: '无法验证日志身份。' });
       continue;
     }
     if (journal.stage === 'applied') {
@@ -607,13 +607,13 @@ export async function recoverIncomplete(options: { dataDir: string }): Promise<R
         const operation = await verifiedAppliedOperation(root, journal, journal.operationId);
         if (!operation) {
           diagnostics.push(`Journal ${journal.operationId} applied record failed verification.`);
-          items.push({ operationId: journal.operationId, status: 'ignored', message: 'The applied operation record could not be verified.' });
+          items.push({ operationId: journal.operationId, status: 'ignored', message: '无法验证已应用操作的记录。' });
         } else {
-          items.push({ operationId: journal.operationId, status: 'completed', message: 'The applied operation record was verified for audit reconciliation.', operation });
+          items.push({ operationId: journal.operationId, status: 'completed', message: '已应用操作的记录经审计核对验证。', operation });
         }
       } catch {
         diagnostics.push(`Journal ${journal.operationId} applied record failed verification.`);
-        items.push({ operationId: journal.operationId, status: 'ignored', message: 'The applied operation record could not be verified.' });
+        items.push({ operationId: journal.operationId, status: 'ignored', message: '无法验证已应用操作的记录。' });
       }
       continue;
     }
@@ -631,7 +631,7 @@ export async function recoverIncomplete(options: { dataDir: string }): Promise<R
           await rm(journal.pendingTempPath, { force: true }).catch(() => undefined);
         }
         await safelyMarkJournal(file, { ...journal, stage: 'aborted' });
-        items.push({ operationId, status: 'not-applied', message: 'The native file still matches the pre-operation snapshot.' });
+        items.push({ operationId, status: 'not-applied', message: '原生文件仍与操作前快照一致。' });
       } else if (currentHash === journal.afterHash && journal.snapshotPath && journal.expectedAfterIdentity
         && sameIdentity(journal.expectedAfterIdentity, identity)) {
         await readSnapshot(root, journal.snapshotPath, journal.beforeHash);
@@ -650,21 +650,21 @@ export async function recoverIncomplete(options: { dataDir: string }): Promise<R
         const verifiedOperation = await verifiedAppliedOperation(root, { ...journal, stage: 'applied', plan, operation, appliedIdentity }, operationId);
         if (!verifiedOperation) {
           diagnostics.push(`Journal ${operationId} applied record failed verification.`);
-          items.push({ operationId, status: 'ignored', message: 'The completed operation record could not be verified.' });
+          items.push({ operationId, status: 'ignored', message: '无法验证已完成操作的记录。' });
         } else {
-          items.push({ operationId, status: 'completed', message: 'The file matches the planned result and the operation record was completed.', operation: verifiedOperation });
+          items.push({ operationId, status: 'completed', message: '文件与计划结果一致，操作记录已完成。', operation: verifiedOperation });
         }
       } else {
         await safelyMarkJournal(file, { ...journal, stage: 'conflict' });
-        items.push({ operationId, status: 'conflict', message: 'The file matches neither the recorded before nor after digest.' });
+        items.push({ operationId, status: 'conflict', message: '文件与记录的前后摘要均不一致。' });
       }
     } catch (error) {
       const code = error instanceof ChangeEngineError ? error.code : 'IO_ERROR';
       if (code === 'LOCKED') {
-        items.push({ operationId, status: 'ignored', message: 'Another AgentDeck operation currently holds this target lock.' });
+        items.push({ operationId, status: 'ignored', message: '另一个 AgentDeck 操作当前持有该目标锁。' });
       } else {
         diagnostics.push(`Journal ${operationId} requires review (${code}).`);
-        items.push({ operationId, status: 'conflict', message: 'Recovery stopped because the target or snapshot could not be verified.' });
+        items.push({ operationId, status: 'conflict', message: '无法验证目标或快照，恢复已停止。' });
         await safelyMarkJournal(file, { ...journal, stage: 'conflict' }).catch(() => undefined);
       }
     } finally {

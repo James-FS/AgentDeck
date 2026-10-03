@@ -27,6 +27,8 @@ Read-only configuration and plugin cache layouts have been checked on this Windo
 
 插件缓存按市场、插件身份与版本建立父子索引。资源页可区分缓存、配置记录和本地文件；详情分别展示资源配置状态、关联配置证据、缓存状态与未知运行状态。登记项目后点击项目卡片的“扫描项目”，读取该项目范围的候选配置和 Skills；项目配置及插件资源保持只读。
 
+运行证据报告将配置启用、当前会话加载 Skill/插件、当前会话 MCP 连接分开；缺少可归属到现有客户端会话的证据时显示“暂未检测”。详见 [运行状态检测](docs/运行状态检测.md)。
+
 实例页提供客户端兼容报告，区分已识别 CLI、未验证的可执行候选、仅有配置、未发现和隔离演示。显式检查版本后，证据按可执行路径及文件身份保存；替换、删除或检查失败使旧证据失效。静态扫描、夹具、原生配置和运行时证据分别展示。检查版本不会开放写入许可。机器可读验收矩阵位于 [docs/compatibility.json](docs/compatibility.json)。
 
 ## Requirements
@@ -71,6 +73,7 @@ The JSON API is under `/api/v1`. Useful routes are:
 
 - `GET /health` — startup status and application version, without filesystem paths or credentials.
 - `GET /api/v1/adapters` and `GET /api/v1/catalog` — adapter capabilities and the current local catalog.
+- `GET /api/v1/runtime` — read-only evidence availability for session loading and MCP connection, separate from configuration state.
 - `GET /api/v1/compatibility` — client identity observations and capability evidence, including unregistered adapters.
 - `POST /api/v1/instances/:id/version-check` with `{}` — explicitly query a supported CLI version in isolated state; command paths cannot be supplied by the browser.
 - `POST /api/v1/instances` and `POST /api/v1/projects` — explicitly register a configuration root or project.

@@ -65,7 +65,7 @@ describe('plugin cache and project source integrity', () => {
   it('rejects declared paths outside a cached package', async () => {
     const report = await scan('codex');
     expect(report.bindings.some(item => item.name === 'must-not-import')).toBe(false);
-    expect([...report.diagnostics, ...report.bindings.flatMap(item => item.diagnostics)].some(message => /outside|escape|contain|bound|unsafe/i.test(message))).toBe(true);
+    expect([...report.diagnostics, ...report.bindings.flatMap(item => item.diagnostics)].some(message => /越界|包内|相对路径/.test(message))).toBe(true);
   });
   it('reads a declared single-Skill directory and inline MCP without exposing its environment', async () => {
     const root = path.join(home, '.codex/plugins/cache/fixture-market/custom-tools/1.0.0');
@@ -95,7 +95,7 @@ describe('plugin cache and project source integrity', () => {
     const report = await scan('codex');
     const conflicting = report.bindings.find(item => item.kind === 'plugin' && item.sourcePath === file)!;
     expect(conflicting.enabled).toBeNull();
-    expect(conflicting.diagnostics.some(message => /identity|name|mismatch|conflict/i.test(message))).toBe(true);
+    expect(conflicting.diagnostics.some(message => /身份|名称|冲突/.test(message))).toBe(true);
   });
   it('does not follow an intermediate junction in a declared skill path', async () => {
     const root = path.join(home, '.codex/plugins/cache/fixture-market/junction-tools/1.0.0');

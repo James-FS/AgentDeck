@@ -152,9 +152,9 @@ export function object(value: unknown): Record<string, unknown> | null {
 }
 
 export function safeDescription(kind: ResourceKind, noun: string): string {
-  if (kind === 'skill') return 'Skill discovered from a bounded local directory scan.';
-  if (kind === 'plugin') return 'Plugin metadata discovered from local configuration.';
-  return `MCP server declared in ${noun}.`;
+  if (kind === 'skill') return 'Skill 来自有限本地目录扫描。';
+  if (kind === 'plugin') return '插件元数据来自本地配置发现。';
+  return `声明于 ${noun} 的 MCP 服务器。`;
 }
 
 export function baseBinding(args: {
@@ -203,7 +203,7 @@ export function baseBinding(args: {
     enabled: args.enabled ?? null,
     runtime: 'unknown',
     writable: args.writable ?? false,
-    readOnlyReason: args.readOnlyReason ?? (args.writable ? null : 'This native entry is read-only in the current compatibility scope.'),
+    readOnlyReason: args.readOnlyReason ?? (args.writable ? null : '该原生条目在当前兼容范围内只读。'),
     diagnostics: args.diagnostics ?? [],
     updatedAt: new Date().toISOString(),
     ...(args.origin === undefined ? {} : { origin: args.origin }),
@@ -253,7 +253,7 @@ export async function canonicalPath(p: string): Promise<string> {
 export async function safeMcpFile<T = unknown>(file: string, diagnostics: string[], label: string): Promise<T | null> {
   if (!(await existsRegularFile(file))) return null;
   const parsed = await readJsonc<T>(file);
-  if (parsed.invalid) diagnostics.push(`${label} contains invalid or oversized JSONC; its entries were skipped.`);
+  if (parsed.invalid) diagnostics.push(`写前检查失败：${label} 包含非法或超限的 JSONC，其条目已跳过。`);
   return parsed.value ?? null;
 }
 
@@ -263,7 +263,7 @@ export async function safeTomlFile<T = unknown>(file: string, diagnostics: strin
     const text = await boundedText(file);
     return { value: parse(text), text };
   } catch {
-    diagnostics.push(`${label} contains invalid or oversized TOML; its entries were skipped.`);
+    diagnostics.push(`写前检查失败：${label} 包含非法或超限的 TOML，其条目已跳过。`);
     return { value: null, text: null };
   }
 }
@@ -303,7 +303,7 @@ export async function scanSkillRoot(args: {
     if (!manifest) continue;
     try { await boundedRead(manifest, MAX_SKILL_BYTES); }
     catch {
-      args.diagnostics.push(`Skill "${name}" has an unreadable or oversized manifest and was skipped.`);
+      args.diagnostics.push(`Skill "${name}" 的 manifest 不可读或超限，已跳过。`);
       continue;
     }
     bindings.push(baseBinding({
@@ -327,7 +327,7 @@ export async function scanSkillRoot(args: {
       ...(args.configurationEnabled === undefined ? {} : { configurationEnabled: args.configurationEnabled }),
       ...(args.cacheState === undefined ? {} : { cacheState: args.cacheState }),
       description: safeDescription('skill', name),
-      readOnlyReason: args.parentId ? 'This Skill is bundled with its parent plugin.' : 'Skill toggles are not validated for this client; the discovered files are read-only.',
+      readOnlyReason: args.parentId ? '该 Skill 随父插件附带。' : '该客户端的 Skill 开关尚未验证；发现的文件保持只读。',
     }));
   }
   return bindings;
@@ -352,7 +352,7 @@ export async function scanSingleSkill(args: {
     if (!(await existsRegularFile(manifest))) continue;
     try { await boundedRead(manifest, MAX_SKILL_BYTES); }
     catch {
-      args.diagnostics.push('A plugin-declared Skill has an unreadable or oversized manifest and was skipped.');
+      args.diagnostics.push('某个插件声明的 Skill manifest 不可读或超限，已跳过。');
       return [];
     }
     return [baseBinding({
@@ -366,7 +366,7 @@ export async function scanSingleSkill(args: {
       ...(args.configurationKey === undefined ? {} : { configurationKey: args.configurationKey }),
       ...(args.configurationEnabled === undefined ? {} : { configurationEnabled: args.configurationEnabled }),
       cacheState: args.cacheState ?? (args.origin === 'filesystem' ? 'unknown' : 'present'), enabled: args.configurationEnabled ?? null,
-      readOnlyReason: 'This Skill is bundled with a cached plugin and cannot be changed independently.',
+      readOnlyReason: '该 Skill 随插件缓存附带，不能独立修改。',
     })];
   }
   return [];

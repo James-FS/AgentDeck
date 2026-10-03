@@ -124,6 +124,26 @@ export interface Catalog {
   lastScanAt: string | null;
 }
 
+/** A read-only assessment of evidence available to this manager, not a client probe. */
+export interface RuntimeObservation {
+  bindingId: string;
+  instanceId: string;
+  kind: ResourceKind;
+  configurationEnabled: boolean | null;
+  indexUpdatedAt: string;
+  sessionLoad: 'not-checked' | 'not-applicable';
+  mcpConnection: 'not-checked' | 'not-applicable';
+  clientSessionId: null;
+  evidenceSource: null;
+  observedAt: null;
+  reason: string;
+}
+
+export interface RuntimeReport {
+  assessedAt: string;
+  observations: RuntimeObservation[];
+}
+
 export interface AdapterInfo {
   id: string;
   name: string;

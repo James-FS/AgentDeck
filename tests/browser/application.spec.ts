@@ -82,7 +82,7 @@ test.describe.serial('built application on loopback', () => {
     await page.getByRole('button', { name: '关闭', exact: true }).click();
     await expect(page.getByRole('dialog')).toBeHidden();
     await expect(row.getByText('已停用', { exact: true })).toBeVisible();
-    await expect(row.getByText('等待生效', { exact: true })).toBeVisible();
+    await expect(row.getByText('暂未检测', { exact: true })).toBeVisible();
     await mkdir('work/browser-proof', { recursive: true });
     await page.screenshot({ path: 'work/browser-proof/resources.png', fullPage: true });
     await page.getByRole('button', { name: /^操作记录/ }).click();
@@ -126,7 +126,7 @@ test.describe.serial('built application on loopback', () => {
     const cachedMcp = page.getByRole('row').filter({ has: page.getByRole('button', { name: 'cached-docs', exact: true }) }).first();
     await expect(cachedMcp).toBeVisible();
     await expect(cachedMcp.getByText('已停用', { exact: true })).toBeVisible();
-    await expect(cachedMcp.getByText('运行状态未知', { exact: true })).toBeVisible();
+    await expect(cachedMcp.getByText('暂未检测', { exact: true })).toBeVisible();
     await cachedMcp.locator('.resource-detail-link').click();
     await expect(page.getByRole('dialog').getByText('所属插件', { exact: true })).toBeVisible();
     await expect(page.getByRole('dialog').getByText(path.join(home, '.codex/plugins/cache/fixture-market/fixture-tools/1.0.0/.mcp.json'), { exact: true })).toBeVisible();

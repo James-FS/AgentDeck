@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
-import type { Binding, CapabilityEvidence, ChangePlan, ClientCompatibilityReport, Operation, ResourceKind } from '@agentdeck/contracts';
+import type { Binding, CapabilityEvidence, ChangePlan, ClientCompatibilityReport, Operation, ResourceKind, RuntimeObservation } from '@agentdeck/contracts';
 import { ArrowRight, Box, Clock, Connection, Document, Files, Folder, FolderAdd, House, InfoFilled, List, Plus, Refresh, Search, Setting, SwitchButton } from '@element-plus/icons-vue';
 import { ElMessage } from 'element-plus';
 import { api } from './api';
@@ -115,8 +115,8 @@ function originLabel(binding: Binding) {
   return binding.projectId ? '项目来源' : '';
 }
 function stateLabel(enabled: boolean | null | undefined) { return enabled === true ? '配置已启用' : enabled === false ? '配置已停用' : '配置状态未知'; }
-function clientStatusLabel(report: ClientCompatibilityReport) {
-  return ({ 'verified-client': 'CLI 签名已识别', 'executable-unverified': '版本未知 · 有程序候选', 'configuration-only': '仅有配置目录', 'not-found': '未发现客户端', demo: '隔离演示' })[report.status];
+function clientStatusLabel(status: ClientCompatibilityReport['status']) {
+  return ({ 'verified-client': 'CLI 签名已识别', 'executable-unverified': '版本未知 · 有程序候选', 'configuration-only': '仅有配置目录', 'not-found': '未发现客户端', demo: '隔离演示' })[status];
 }
 function capabilityAreaLabel(area: CapabilityEvidence['area']) {
   return ({ 'static-scan': '静态扫描', 'fixture-validation': '夹具验证', 'native-config': '原生配置复读', runtime: '运行时观察' })[area];
@@ -177,7 +177,40 @@ function timeLabel(value: string | null | undefined) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(date);
 }
-function runtimeLabel(value: Binding['runtime']) { return ({ unknown: '运行状态未知', pending: '等待生效', active: '运行中', inactive: '未运行' })[value] ?? '运行状态未知'; }
+function runtimeObservation(binding: Binding): RuntimeObservation | undefined {
+  return store.runtime?.observations.find(item => item.bindingId === binding.id && item.instanceId === binding.instanceId);
+}
+function runtimeLabel(binding: Binding) { return runtimeObservation(binding) ? '暂未检测' : '无法确认'; }
+function runtimeReason(binding: Binding) { return runtimeObservation(binding)?.reason ?? '没有与此资源对应的会话证据报告；请刷新后重试。'; }
+const adapterStatusPriority = ['verified-client', 'executable-unverified', 'configuration-only', 'demo', 'not-found'] as const;
+function instanceCountFor(agentId: string) { return store.instances.filter((item) => item.agentId === agentId).length; }
+function resourceCountFor(agentId: string) {
+  const ids = new Set(store.instances.filter((item) => item.agentId === agentId).map((item) => item.id));
+  return store.bindings.filter((item) => ids.has(item.instanceId)).length;
+}
+function adapterStateFor(agentId: string): ClientCompatibilityReport['status'] {
+  const ids = new Set(store.instances.filter((item) => item.agentId === agentId).map((item) => item.id));
+  const statuses = (store.compatibility?.clients ?? [])
+    .filter((report) => report.instanceId !== null && ids.has(report.instanceId))
+    .map((report) => report.status);
+  return adapterStatusPriority.find((status) => statuses.includes(status)) ?? 'not-found';
+}
+function legacyCopy(value: string) {
+  const area = document.createElement('textarea');
+  area.value = value;
+  area.style.position = 'fixed';
+  area.style.opacity = '0';
+  document.body.appendChild(area);
+  area.select();
+  try { document.execCommand('copy'); ElMessage.success('摘要已复制'); }
+  catch { ElMessage.error('复制失败，请手动选择复制'); }
+  area.remove();
+}
+async function copyHash(value: string | null | undefined) {
+  if (!value) return;
+  try { await navigator.clipboard.writeText(value); ElMessage.success('摘要已复制'); }
+  catch { legacyCopy(value); }
+}
 function togglePlugin(id: string) { const next = new Set(expanded.value); next.has(id) ? next.delete(id) : next.add(id); expanded.value = next; }
 function openInstanceForm() { instanceForm.agentId = store.adapters[0]?.id ?? ''; instanceForm.name = ''; instanceForm.configRoot = ''; instanceForm.writable = false; drawer.value = 'instance'; }
 function openProjectForm() { projectForm.name = ''; projectForm.rootPath = ''; drawer.value = 'project'; }
@@ -208,6 +241,7 @@ async function scan(discover = false, discoverUserHome = false) {
   try {
     if (discoverUserHome) { store.selectedInstanceId = ''; store.selectedProjectId = ''; clearFilters(); }
     store.setCatalog(await api.scan({ discover, discoverUserHome, ...(store.selectedInstanceId ? { instanceId: store.selectedInstanceId } : {}), ...(store.selectedProjectId ? { projectId: store.selectedProjectId } : {}) }));
+    await store.refresh();
     ElMessage.success(discoverUserHome ? `本机只读扫描完成，索引共 ${store.bindings.length} 项资源` : discover ? '扫描与实例发现已完成' : '只读扫描已完成');
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '扫描失败'); }
   finally { actionBusy.value = false; }
@@ -219,6 +253,7 @@ async function scanProject(projectId: string) {
     store.selectedInstanceId = '';
     store.selectedProjectId = projectId;
     store.setCatalog(await api.scan({ projectId }));
+    await store.refresh();
     page.value = 'resources';
     ElMessage.success('项目只读扫描完成');
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '项目扫描失败'); }
@@ -260,7 +295,7 @@ async function planRestore(operation: Operation) {
   catch (error) { ElMessage.error(error instanceof Error ? error.message : '无法生成恢复计划'); }
   finally { restoreBusy.value = ''; }
 }
-function goTo(next: Page) { page.value = next; if (next === 'operations') void loadOperations(); }
+function goTo(next: Page) { page.value = next; if (next === 'operations' || next === 'overview') void loadOperations(); }
 function clearFilters() { kindFilter.value = 'all'; scopeFilter.value = []; compatibilityFilter.value = []; applicableAgentFilter.value = []; sourceFilter.value = []; originFilter.value = 'all'; searchText.value = ''; }
 function openEvents() {
   if (eventSource) return;
@@ -310,14 +345,40 @@ onBeforeUnmount(() => eventSource?.close());
       </section>
 
       <section v-else class="content">
-        <div class="page-heading"><div><small class="eyebrow"><i></i> LOCAL ENVIRONMENT</small><h1>{{ pages.find((item) => item.id === page)?.label }}</h1><p>{{ page === 'resources' ? '查看本机配置发现的 Skill、插件和 MCP，状态来自当前注册适配器。' : page === 'instances' ? '登记配置根目录并查看适配器注册表提供的能力范围。' : page === 'projects' ? '手动登记项目根目录，为扫描提供明确边界。' : page === 'operations' ? '查看配置变更结果，并从成功操作创建恢复计划。' : '本机 Agent 配置资源与扫描状态。' }}</p></div>
+        <div class="page-heading"><div><small class="eyebrow"><i></i> LOCAL ENVIRONMENT</small><h1>{{ pages.find((item) => item.id === page)?.label }}</h1><p>{{ page === 'resources' ? '查看本机配置发现的 Skill、插件和 MCP，状态来自当前注册适配器。' : page === 'instances' ? '登记配置根目录并查看适配器注册表提供的能力范围。' : page === 'projects' ? '手动登记项目根目录，为扫描提供明确边界。' : page === 'operations' ? '查看配置变更结果，并从成功操作创建恢复计划。' : '总览本机客户端状态、资源规模与最近配置变更。' }}</p></div>
           <div class="heading-actions"><template v-if="page === 'instances'"><el-button @click="scan(true, true)" :loading="actionBusy"><el-icon><Search /></el-icon>发现客户端</el-button><el-button type="primary" @click="openInstanceForm"><el-icon><Plus /></el-icon>登记实例</el-button></template><el-button v-if="page === 'projects'" type="primary" @click="openProjectForm"><el-icon><FolderAdd /></el-icon>登记项目</el-button><template v-if="page === 'resources' || page === 'overview'"><el-button @click="scan(false)" :loading="actionBusy"><el-icon><Refresh /></el-icon>重新扫描已登记实例</el-button><el-button type="primary" @click="scan(true, true)" :loading="actionBusy"><el-icon><Search /></el-icon>发现并扫描本机资源</el-button></template></div>
         </div>
         <div v-if="store.refreshError" class="inline-error"><el-icon><InfoFilled /></el-icon><span>{{ store.refreshError }}</span><el-button text @click="refresh">重试</el-button></div>
 
         <template v-if="page === 'overview' || page === 'resources'">
           <div class="stats"><article><div><span>已登记实例</span><i><Connection /></i></div><strong>{{ store.instances.length.toString().padStart(2,'0') }}</strong><small>来自本机适配器目录</small></article><article><div><span>可见扩展</span><i class="blue"><Box /></i></div><strong>{{ stats.all.toString().padStart(2,'0') }}</strong><small>当前筛选范围内</small></article><article><div><span>Skill</span><i class="violet"><Document /></i></div><strong>{{ stats.skills.toString().padStart(2,'0') }}</strong><small>按三类元数据查看</small></article><article><div><span>插件 / MCP</span><i class="amber"><Files /></i></div><strong>{{ (stats.plugins + stats.mcps).toString().padStart(2,'0') }}</strong><small>插件 {{ stats.plugins }} · MCP {{ stats.mcps }}</small></article><article><div><span>扫描提示</span><i class="rose"><InfoFilled /></i></div><strong>{{ stats.diagnostics.toString().padStart(2,'0') }}</strong><small>适配器返回的诊断</small></article></div>
-          <section class="panel"><div class="panel-heading"><div><h2>{{ page === 'overview' ? '资源概况' : '本机资源' }}</h2><small>{{ store.catalog?.lastScanAt ? `上次扫描 ${timeLabel(store.catalog.lastScanAt)}` : '尚无扫描记录' }}</small></div><div class="panel-tools"><el-input v-model="searchText" clearable placeholder="搜索名称或来源路径"><template #prefix><el-icon><Search /></el-icon></template></el-input><el-button class="refresh" aria-label="刷新资源" :loading="store.busy" @click="refresh"><el-icon><Refresh /></el-icon></el-button></div></div>
+          <template v-if="page === 'overview'">
+            <div class="overview-grid">
+              <section class="panel overview-panel">
+                <div class="panel-heading"><div><h2>客户端状态</h2><small>按适配器汇总实例与资源规模；版本与能力证据见 Agent 实例页。</small></div><el-button size="small" @click="goTo('instances')">查看实例</el-button></div>
+                <div class="client-summary">
+                  <button v-for="adapter in store.adapters" :key="adapter.id" class="client-row" @click="goTo('instances')">
+                    <i>{{ adapter.name.slice(0,1) }}</i>
+                    <div><b>{{ adapter.name }}</b><small>{{ instanceCountFor(adapter.id) }} 个实例 · {{ resourceCountFor(adapter.id) }} 项资源</small></div>
+                    <span class="summary-state status-chip" :class="adapterStateFor(adapter.id)">{{ clientStatusLabel(adapterStateFor(adapter.id)) }}</span>
+                  </button>
+                  <p v-if="!store.adapters.length" class="sidebar-note">连接服务后读取适配器注册表</p>
+                </div>
+              </section>
+              <section class="panel overview-panel">
+                <div class="panel-heading"><div><h2>最近操作</h2><small>成功操作可在操作记录中创建恢复计划。</small></div><el-button size="small" @click="goTo('operations')">查看全部</el-button></div>
+                <div v-if="operations.length" class="recent-ops">
+                  <div v-for="op in operations.slice(0,5)" :key="op.id" class="recent-op">
+                    <span :class="['op-status', op.status]">{{ op.status==='succeeded'?'已完成':op.status==='conflict'?'检测到冲突':'失败' }}</span>
+                    <div><b>{{ op.kind==='restore'?'恢复配置':'启停配置' }}</b><small>{{ op.targetPath }}</small></div>
+                    <small class="recent-time">{{ timeLabel(op.createdAt) }}</small>
+                  </div>
+                </div>
+                <div v-else class="empty slim"><i><el-icon><List/></el-icon></i><b>暂无配置操作</b><span>基础版支持独立 MCP，以及已验收的配置根 Skill 和本地市场插件开关。</span></div>
+              </section>
+            </div>
+          </template>
+          <section v-else class="panel"><div class="panel-heading"><div><h2>本机资源</h2><small>{{ store.catalog?.lastScanAt ? `上次扫描 ${timeLabel(store.catalog.lastScanAt)}` : '尚无扫描记录' }}</small></div><div class="panel-tools"><el-input v-model="searchText" clearable placeholder="搜索名称或来源路径"><template #prefix><el-icon><Search /></el-icon></template></el-input><el-button class="refresh" circle aria-label="刷新资源" :loading="store.busy" @click="refresh"><el-icon><Refresh /></el-icon></el-button></div></div>
             <div class="filter-row"><div class="tabs"><button v-for="tab in [{id:'all',label:'全部'},{id:'skill',label:'Skill'},{id:'plugin',label:'插件'},{id:'mcp',label:'MCP'}]" :key="tab.id" :class="{selected:kindFilter===tab.id}" @click="kindFilter=tab.id as 'all'|'skill'|'plugin'|'mcp'">{{ tab.label }}<small v-if="tab.id==='all'">{{ scoped.length }}</small></button></div><div class="skill-filters" :class="{ muted: kindFilter==='plugin'||kindFilter==='mcp' }">
               <el-select v-model="scopeFilter" multiple collapse-tags collapse-tags-tooltip clearable placeholder="作用范围" :disabled="kindFilter==='plugin'||kindFilter==='mcp'"><el-option label="用户全局" value="user-global"/><el-option label="项目级" value="project"/><el-option label="项目子目录级" value="project-directory"/><el-option label="原生特殊范围" value="native"/></el-select>
               <el-select v-model="compatibilityFilter" multiple collapse-tags collapse-tags-tooltip clearable placeholder="客户端适用性" :disabled="kindFilter==='plugin'||kindFilter==='mcp'"><el-option label="跨 Agent 通用声明" value="portable"/><el-option label="Agent 专用" value="agent-specific"/><el-option label="部分兼容" value="conditional"/><el-option label="尚未判断" value="unknown"/></el-select>
@@ -327,12 +388,12 @@ onBeforeUnmount(() => eventSource?.close());
             </div></div>
             <div v-if="!skillAgentsKnown && kindFilter!=='plugin' && kindFilter!=='mcp'" class="taxonomy-note"><el-icon><InfoFilled /></el-icon>尚无各 Agent 的兼容性检测结果，暂不能按适用 Agent 筛选。</div>
             <div v-if="visible.length" class="table-scroll"><table><thead><tr><th>扩展资源</th><th>作用范围</th><th>客户端适用性</th><th>来源</th><th>配置状态</th><th>运行状态</th><th>控制能力</th><th></th></tr></thead><tbody>
-              <tr v-for="item in visible" :key="item.binding.id" :class="{child:item.depth>0,parent:item.binding.kind==='plugin'}"><td><div class="resource-cell" :style="{paddingLeft:`${item.depth*24}px`}"><button v-if="item.binding.kind==='plugin'&&item.children" class="tree-toggle" :class="{expanded:expanded.has(item.binding.id)}" :aria-expanded="expanded.has(item.binding.id)" :aria-label="expanded.has(item.binding.id)?'收起插件组件':'展开插件组件'" @click="togglePlugin(item.binding.id)">›</button><span v-else-if="item.depth" class="tree-stem"></span><i class="kind-icon" :class="item.binding.kind"><el-icon><component :is="item.binding.kind==='skill'?Document:item.binding.kind==='plugin'?Box:Connection"/></el-icon></i><div class="resource-copy"><button class="resource-detail-link" @click="openBinding(item.binding)">{{ item.binding.name }}</button><small>{{ item.depth ? `由 ${store.bindings.find(b=>b.id===item.binding.parentId)?.name??'插件'} 提供` : item.binding.description || item.binding.nativeKey || item.binding.sourcePath }}</small></div><small v-if="item.binding.kind==='plugin'&&item.children" class="child-count">{{ item.children }} 项</small></div></td>
+              <tr v-for="item in visible" :key="item.binding.id" :class="{child:item.depth>0,parent:item.binding.kind==='plugin'}"><td><div class="resource-cell" :style="{paddingLeft:`${item.depth*24}px`}"><button v-if="item.binding.kind==='plugin'&&item.children" class="tree-toggle" :class="{expanded:expanded.has(item.binding.id)}" :aria-expanded="expanded.has(item.binding.id)" :aria-label="expanded.has(item.binding.id)?'收起插件组件':'展开插件组件'" @click="togglePlugin(item.binding.id)"><el-icon><ArrowRight/></el-icon></button><span v-else-if="item.depth" class="tree-stem"></span><i class="kind-icon" :class="item.binding.kind"><el-icon><component :is="item.binding.kind==='skill'?Document:item.binding.kind==='plugin'?Box:Connection"/></el-icon></i><div class="resource-copy"><button class="resource-detail-link" @click="openBinding(item.binding)">{{ item.binding.name }}</button><small>{{ item.depth ? `由 ${store.bindings.find(b=>b.id===item.binding.parentId)?.name??'插件'} 提供` : item.binding.description || item.binding.nativeKey || item.binding.sourcePath }}</small></div><small v-if="item.binding.kind==='plugin'&&item.children" class="child-count">{{ item.children }} 项</small></div></td>
                 <td><span v-if="item.binding.kind==='skill'" class="tag scope">{{ (item.binding as SkillBinding).scopeLabel ?? scopeLabel(item.binding.scope) }}</span><span v-else>{{ scopeLabel(item.binding.scope) }}</span></td>
                 <td><span v-if="item.binding.kind==='skill'" class="compat"><i :class="item.binding.compatibilityClass"></i>{{ compatibilityLabel(item.binding) }}<el-tooltip v-if="!Array.isArray((item.binding as SkillBinding).applicableAgentIds)" content="本轮契约没有逐 Agent 适用报告，不能据此判断目标客户端。"><el-icon><InfoFilled /></el-icon></el-tooltip><small v-else>{{ applicableLabel(item.binding) }}</small></span><span v-else class="muted-text">—</span></td>
                 <td><span v-if="item.binding.kind==='skill'" class="tag source">{{ (item.binding as SkillBinding).sourceLabel ?? sourceLabel(item.binding.sourceKind) }}</span><span v-else>{{ sourceLabel(item.binding.sourceKind) }}</span><small v-if="originLabel(item.binding)" class="origin-detail">{{ originLabel(item.binding) }}</small></td>
                 <td><span class="config-state" :class="item.binding.enabled===true?'on':item.binding.enabled===false?'off':'unknown'"><i></i>{{ item.binding.enabled===true?'已启用':item.binding.enabled===false?'已停用':'未知' }}</span></td>
-                <td><span class="runtime-state" :class="item.binding.runtime">{{ runtimeLabel(item.binding.runtime) }}</span></td>
+                <td><span class="runtime-state unknown" :title="runtimeReason(item.binding)">{{ runtimeLabel(item.binding) }}</span></td>
                 <td><el-tooltip v-if="canPlan(item.binding)" :content="`实验性计划：${readOnlyReason(item.binding)}`"><button class="plan-link" :disabled="actionBusy" @click="planToggle(item.binding,item.binding.enabled!==true)">{{ item.binding.enabled===true?'计划停用':item.binding.enabled===false?'计划启用':'生成启用计划' }}<el-icon><ArrowRight/></el-icon></button></el-tooltip><el-tooltip v-else :content="readOnlyReason(item.binding)"><span class="readonly"><el-icon><Setting/></el-icon>只读</span></el-tooltip></td>
                 <td><el-tooltip v-if="item.binding.diagnostics.length" :content="item.binding.diagnostics.join('；')"><el-icon class="notice"><InfoFilled/></el-icon></el-tooltip></td></tr>
             </tbody></table></div>
@@ -342,8 +403,8 @@ onBeforeUnmount(() => eventSource?.close());
           </section>
         </template>
 
-        <section v-else-if="page==='instances'" class="panel records-panel"><div class="panel-heading"><div><h2>客户端兼容报告</h2><small>PATH 候选、配置目录、CLI 签名和逐资源能力证据分别展示；扫描本身不会启动客户端。</small></div><el-button type="primary" @click="openInstanceForm"><el-icon><Plus/></el-icon>登记实例</el-button></div>
-          <div v-if="store.compatibility?.clients.length" class="instance-grid"><article v-for="report in store.compatibility.clients" :key="report.id" class="instance-card"><div class="instance-top"><i>{{ report.agentName.slice(0,1) }}</i><small :class="report.status">{{ clientStatusLabel(report) }}</small></div><h3>{{ report.instanceName??`${report.agentName} · 未登记实例` }}</h3><span class="instance-client">{{ report.agentName }} · {{ report.instanceId ? (store.instances.find(i=>i.id===report.instanceId)?.discovery==='auto'?'自动发现':store.instances.find(i=>i.id===report.instanceId)?.discovery==='manual'?'手动登记':'隔离演示') : '仅显示未登记客户端状态' }}</span>
+        <section v-else-if="page==='instances'" class="panel records-panel"><div class="panel-heading"><div><h2>客户端兼容报告</h2><small>PATH 候选、配置目录、CLI 签名和逐资源能力证据分别展示；扫描本身不会启动客户端。</small></div></div>
+          <div v-if="store.compatibility?.clients.length" class="instance-grid"><article v-for="report in store.compatibility.clients" :key="report.id" class="instance-card"><div class="instance-top"><i>{{ report.agentName.slice(0,1) }}</i><small class="status-chip" :class="report.status">{{ clientStatusLabel(report.status) }}</small></div><h3>{{ report.instanceName??`${report.agentName} · 未登记实例` }}</h3><span class="instance-client">{{ report.agentName }} · {{ report.instanceId ? (store.instances.find(i=>i.id===report.instanceId)?.discovery==='auto'?'自动发现':store.instances.find(i=>i.id===report.instanceId)?.discovery==='manual'?'手动登记':'隔离演示') : '仅显示未登记客户端状态' }}</span>
             <div class="path-block"><small>配置根目录 · {{ clientConfigStateLabel(report) }}</small><code>{{ report.configRoot??'适配器未提供默认配置路径' }}</code></div>
             <div class="path-block"><small>PATH 程序候选</small><code>{{ report.executableCandidate?.path??'未发现候选' }}</code><small v-if="report.executableCandidate">候选身份检查 {{ timeLabel(report.executableCandidate.checkedAt) }}</small></div>
             <div class="policy"><small>CLI 版本证据</small><b>{{ report.versionEvidence ? `${report.versionEvidence.version} · ${report.versionEvidence.platform}` : report.status==='demo'?'演示数据没有主机版本证据':'版本未知 · 尚无可识别版本签名' }}</b><span>{{ report.versionEvidence?'只识别到 CLI 输出签名，不证明官方发行来源、桌面应用安装或资源正在运行。':report.agentId==='codex'||report.agentId==='claude-code'?'需手动触发 --version 检查；失败时不会保存原始输出。':'此客户端没有已验证的版本检查命令，只显示 PATH 候选。' }}</span></div>
@@ -365,7 +426,7 @@ onBeforeUnmount(() => eventSource?.close());
     <el-drawer :model-value="drawer!==null" @update:model-value="drawerVisibility" :title="drawer==='instance'?'登记 Agent 实例':drawer==='project'?'登记项目空间':drawer==='binding'?'资源详情':'检查变更计划'" :size="drawer==='plan'?'min(660px,96vw)':'min(500px,96vw)'" destroy-on-close>
         <template v-if="drawer==='instance'"><div class="drawer-intro"><i><el-icon><Connection/></el-icon></i><div><b>添加本机配置来源</b><small>只读取你提交的目录，不猜测或改写其他路径。</small></div></div><el-form label-position="top" class="drawer-form" @submit.prevent="saveInstance"><el-form-item label="客户端" required><el-select v-model="instanceForm.agentId" placeholder="从适配器注册表选择" class="full"><el-option v-for="a in store.adapters" :key="a.id" :value="a.id" :label="a.name"/></el-select></el-form-item><el-form-item label="显示名称"><el-input v-model="instanceForm.name" placeholder="可选，例如：工作用配置"/></el-form-item><el-form-item label="配置根目录" required><el-input v-model="instanceForm.configRoot" placeholder="例如：C:\Users\you\.config\agent"/></el-form-item><div v-if="instanceForm.agentId==='codex'" class="write-opt"><el-checkbox v-model="instanceForm.writable">允许 Codex 配置修改（仅支持的单项资源）</el-checkbox><p>手动登记并通过资源级校验后才开放计划。Skill 和本地市场插件仅支持已检查的 Codex 0.159.2 / Windows；独立 MCP 保留实验性 HTTP/未知传输。只改用户配置，运行状态未知。</p></div><div v-else class="readonly-note"><el-icon><InfoFilled/></el-icon>当前客户端首轮为只读接入；登记不会开放写入操作。</div><div class="drawer-footer"><el-button @click="drawer=null">取消</el-button><el-button type="primary" :loading="actionBusy" :disabled="!instanceForm.agentId||!instanceForm.configRoot.trim()" @click="saveInstance">登记实例</el-button></div></el-form></template>
       <template v-else-if="drawer==='project'"><div class="drawer-intro"><i><el-icon><Folder/></el-icon></i><div><b>设置扫描边界</b><small>只扫描登记的项目路径，不进行全盘搜索。</small></div></div><el-form label-position="top" class="drawer-form" @submit.prevent="saveProject"><el-form-item label="项目名称"><el-input v-model="projectForm.name" placeholder="留空时由服务端生成显示名称"/></el-form-item><el-form-item label="项目根目录" required><el-input v-model="projectForm.rootPath" placeholder="例如：D:\work\my-project"/></el-form-item><div class="drawer-footer"><el-button @click="drawer=null">取消</el-button><el-button type="primary" :loading="actionBusy" :disabled="!projectForm.rootPath.trim()" @click="saveProject">登记项目</el-button></div></el-form></template>
-      <template v-else-if="drawer==='plan'&&activePlan"><div class="plan-warning"><i><el-icon><Setting/></el-icon></i><div><b>{{ restoreOf?'配置恢复计划':'Codex 资源配置计划' }}</b><small>配置修改 · 支持范围见资源证据；应用后重启 Codex，当前会话状态未知</small></div><span>{{ appliedOperation?'已提交':activePlan.status==='ready'?'待核对':activePlan.status==='applied'?'已应用':'已过期' }}</span></div><section class="plan-section"><small>修改目标</small><div class="target"><i class="kind-icon mcp"><el-icon><Connection/></el-icon></i><div><b>{{ planBinding?.name??'资源' }}</b><small>{{ planInstance?`${agentName(planInstance.agentId)} · ${planInstance.name}`:activePlan.instanceId }}</small></div></div><div class="plan-path"><small>配置文件</small><code>{{ activePlan.targetPath }}</code></div><div class="plan-path"><small>计划动作</small><b>{{ activePlan.action==='restore'?'恢复到操作前配置':activePlan.desiredEnabled?'启用资源配置':'停用资源配置' }}</b></div></section><section class="impact"><div><small>影响范围</small><b>{{ affected.length+1 }} 条关联绑定</b></div><p>本次只修改目标实例的用户配置。插件开关影响该身份全部版本和子组件；Skill 只改按路径覆盖，原文保持不变。关联条目会重新扫描，运行状态仍未知。</p><div class="impact-row current"><i></i><b>{{ planBinding?.name??'当前绑定' }}</b><span>{{ planInstance?agentName(planInstance.agentId):'目标实例' }} · 本次计划</span></div><div v-for="b in affected" :key="b.id" class="impact-row"><i></i><b>{{ b.name }}</b><span>{{ store.instances.find(i=>i.id===b.instanceId)?.name??b.instanceId }} · 同源关联</span></div></section><section class="diff"><div><small>脱敏差异</small><span><el-icon><InfoFilled/></el-icon>不显示原始凭据</span></div><pre>{{ activePlan.diff||'适配器未返回差异文本。' }}</pre><div class="hashes"><span><small>写前摘要</small><code>{{ activePlan.beforeHash }}</code></span><span><small>应用确认摘要（afterHash）</small><code>{{ activePlan.afterHash }}</code></span></div></section><div class="plan-notes"><p><el-icon><InfoFilled/></el-icon>应用时提交 afterHash。若配置已变化、计划过期或目标身份无法确认，服务端应拒绝写入。</p><p><el-icon><Clock/></el-icon>计划有效期至 {{ timeLabel(activePlan.expiresAt) }}</p><p v-if="appliedOperation"><el-icon><InfoFilled/></el-icon>操作结果：{{ appliedOperation.status }}<template v-if="appliedOperation.error"> · {{ appliedOperation.error }}</template></p></div><div class="drawer-footer plan-actions"><el-button @click="drawer=null">{{ appliedOperation?'关闭':'稍后处理' }}</el-button><el-button v-if="activePlan.status==='ready'&&!appliedOperation" type="primary" :loading="actionBusy" @click="applyPlan">确认应用计划</el-button></div></template>
+      <template v-else-if="drawer==='plan'&&activePlan"><div class="plan-warning"><i><el-icon><Setting/></el-icon></i><div><b>{{ restoreOf?'配置恢复计划':'Codex 资源配置计划' }}</b><small>配置修改 · 支持范围见资源证据；应用后重启 Codex，当前会话状态未知</small></div><span>{{ appliedOperation?'已提交':activePlan.status==='ready'?'待核对':activePlan.status==='applied'?'已应用':'已过期' }}</span></div><section class="plan-section"><small>修改目标</small><div class="target"><i class="kind-icon mcp"><el-icon><Connection/></el-icon></i><div><b>{{ planBinding?.name??'资源' }}</b><small>{{ planInstance?`${agentName(planInstance.agentId)} · ${planInstance.name}`:activePlan.instanceId }}</small></div></div><div class="plan-path"><small>配置文件</small><code>{{ activePlan.targetPath }}</code></div><div class="plan-path"><small>计划动作</small><b>{{ activePlan.action==='restore'?'恢复到操作前配置':activePlan.desiredEnabled?'启用资源配置':'停用资源配置' }}</b></div></section><section class="impact"><div><small>影响范围</small><b>{{ affected.length+1 }} 条关联绑定</b></div><p>本次只修改目标实例的用户配置。插件开关影响该身份全部版本和子组件；Skill 只改按路径覆盖，原文保持不变。关联条目会重新扫描，运行状态仍未知。</p><div class="impact-row current"><i></i><b>{{ planBinding?.name??'当前绑定' }}</b><span>{{ planInstance?agentName(planInstance.agentId):'目标实例' }} · 本次计划</span></div><div v-for="b in affected" :key="b.id" class="impact-row"><i></i><b>{{ b.name }}</b><span>{{ store.instances.find(i=>i.id===b.instanceId)?.name??b.instanceId }} · 同源关联</span></div></section><section class="diff"><div><small>脱敏差异</small><span><el-icon><InfoFilled/></el-icon>不显示原始凭据</span></div><pre>{{ activePlan.diff||'适配器未返回差异文本。' }}</pre><div class="hashes"><span><small>写前摘要</small><code>{{ activePlan.beforeHash }}</code><button class="hash-copy" type="button" @click="copyHash(activePlan.beforeHash)">复制</button></span><span><small>应用确认摘要（afterHash）</small><code>{{ activePlan.afterHash }}</code><button class="hash-copy" type="button" @click="copyHash(activePlan.afterHash)">复制</button></span></div></section><div class="plan-notes"><p><el-icon><InfoFilled/></el-icon>应用时提交 afterHash。若配置已变化、计划过期或目标身份无法确认，服务端应拒绝写入。</p><p><el-icon><Clock/></el-icon>计划有效期至 {{ timeLabel(activePlan.expiresAt) }}</p><p v-if="appliedOperation"><el-icon><InfoFilled/></el-icon>操作结果：{{ appliedOperation.status }}<template v-if="appliedOperation.error"> · {{ appliedOperation.error }}</template></p></div><div class="drawer-footer plan-actions"><el-button @click="drawer=null">{{ appliedOperation?'关闭':'稍后处理' }}</el-button><el-button v-if="activePlan.status==='ready'&&!appliedOperation" type="primary" :loading="actionBusy" @click="applyPlan">确认应用计划</el-button></div></template>
       <template v-else-if="drawer==='binding'&&selectedBinding">
         <div class="detail-header">
           <i class="kind-icon" :class="selectedBinding.kind"><el-icon><component :is="selectedBinding.kind==='skill'?Document:selectedBinding.kind==='plugin'?Box:Connection"/></el-icon></i>
@@ -375,7 +436,9 @@ onBeforeUnmount(() => eventSource?.close());
           <div><small>所属客户端</small><b>{{ agentName(store.instances.find(i=>i.id===selectedBinding?.instanceId)?.agentId??'') }}</b></div>
           <div><small>配置状态</small><b>{{ stateLabel(selectedBinding.enabled) }}</b></div>
           <div><small>索引来源</small><b>{{ originLabel(selectedBinding) || '来源类型未知' }}</b></div>
-          <div><small>运行状态</small><b>{{ runtimeLabel(selectedBinding.runtime) }}</b></div>
+          <div><small>{{ selectedBinding.kind==='mcp'?'当前会话 MCP 连接':'当前会话加载' }}</small><b>{{ runtimeLabel(selectedBinding) }}</b></div>
+          <div class="wide"><small>运行证据说明</small><b>{{ runtimeReason(selectedBinding) }}</b></div>
+          <div class="wide"><small>会话归属与采集时间</small><b>{{ runtimeObservation(selectedBinding)?.clientSessionId ?? '无可确认的客户端会话' }} · {{ runtimeObservation(selectedBinding)?.observedAt ? timeLabel(runtimeObservation(selectedBinding)!.observedAt!) : '尚无运行观察时间' }}</b></div>
           <div><small>来源</small><b>{{ sourceLabel(selectedBinding.sourceKind) }}</b></div>
           <div><small>作用范围</small><b>{{ scopeLabel(selectedBinding.scope) }}</b></div>
           <div v-if="selectedBinding.kind==='mcp'"><small>MCP 传输</small><b>{{ selectedBinding.mcpTransport==='stdio'?'STDIO':selectedBinding.mcpTransport==='http'?'HTTP':'未知；不适用已验证的原生 STDIO 案例' }}</b></div>
@@ -401,11 +464,3 @@ onBeforeUnmount(() => eventSource?.close());
     </el-drawer>
   </div>
 </template>
-
-<style>
-.resource-detail-link{max-width:230px;overflow:hidden;padding:0;border:0;background:transparent;color:#495b51;font-size:9px;font-weight:700;text-align:left;text-overflow:ellipsis;white-space:nowrap}.resource-detail-link:hover{color:#247451;text-decoration:underline;text-underline-offset:2px}
-.tree-toggle.expanded{transform:rotate(90deg)}
-.detail-header{display:flex;align-items:center;gap:10px;padding:1px 0 16px;border-bottom:1px solid #e9eeeb}.detail-header>div{display:flex;min-width:0;flex-direction:column;gap:5px}.detail-header b{color:#45594c;font-size:11px}.detail-header small{color:#929e97;font-size:8px;overflow-wrap:anywhere}.detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 12px;margin-top:9px}.detail-grid>div{display:flex;min-width:0;flex-direction:column;gap:6px;padding:12px 2px;border-bottom:1px solid #edf1ee}.detail-grid>div.wide{grid-column:1/-1}.detail-grid small{color:#9aa69f;font-size:7px}.detail-grid b{color:#617168;font-size:8px;font-weight:600;line-height:1.55;overflow-wrap:anywhere}.detail-grid code{color:#65766d;font:7px/1.6 'DM Mono',monospace;overflow-wrap:anywhere}.detail-diagnostics{margin-top:16px;padding:12px;border:1px solid #efe8d8;border-radius:6px;background:#fdfbf6;color:#897651;font-size:8px}.detail-diagnostics>b{font-size:8px}.detail-diagnostics p{display:flex;gap:6px;align-items:flex-start;margin:8px 0 0;line-height:1.6}.detail-diagnostics p .el-icon{margin-top:1px;flex:0 0 auto}.detail-diagnostics.quiet{display:flex;align-items:center;gap:6px;border-color:#e9eeeb;background:#f7f9f7;color:#95a199}
-.origin-detail{display:block;margin-top:3px;color:#86968c;font-size:7px;line-height:1.5;overflow-wrap:anywhere}.project-list article>.el-button{margin-left:auto;flex:0 0 auto}
-.instance-top>small.verified-client{background:#edf5ef;color:#4c876a}.instance-top>small.executable-unverified{background:#f8f3e8;color:#9a8055}.instance-top>small.configuration-only,.instance-top>small.not-found{background:#f2f4f2;color:#89968e}.instance-top>small.demo{background:#f2eff8;color:#79719a}.report-actions{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:12px;padding-top:9px;border-top:1px solid #edf1ee;color:#99a49e;font-size:7px}.report-actions .el-button{height:27px;border-color:#e3ebe6;color:#557263;font-size:8px}.matrix-details{margin-top:12px;border-top:1px solid #edf1ee}.matrix-details>summary{padding:10px 1px;color:#5e7668;font-size:8px;font-weight:700;cursor:pointer;list-style:none}.matrix-details>summary::-webkit-details-marker{display:none}.matrix-details>summary:after{content:'＋';float:right;color:#91a098}.matrix-details[open]>summary:after{content:'−'}.capability-matrix{display:flex;flex-direction:column;gap:6px}.capability-matrix article{display:flex;flex-direction:column;gap:5px;padding:9px;border:1px solid #eaf0ec;border-radius:6px;background:#fff}.evidence-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}.evidence-head b{color:#5d7065;font-size:7px;line-height:1.5}.evidence-head small{color:#8a9a90;font-size:7px;white-space:nowrap}.capability-matrix article>span,.capability-matrix article>small,.capability-matrix article>code{color:#8e9c94;font-size:7px;line-height:1.5;overflow-wrap:anywhere}.capability-matrix article>p{margin:0;color:#89978f;font-size:7px;line-height:1.6}.detail-grid .evidence-detail{gap:8px}.detail-grid .evidence-detail>.capability-matrix{width:100%}.no-evidence{margin:0;color:#98a39d;font-size:7px;line-height:1.6}
-</style>

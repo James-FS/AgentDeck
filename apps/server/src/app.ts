@@ -134,7 +134,7 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
     }
     const origin = request.headers.origin;
     if (origin !== undefined && !originAllowed(origin, allowedOrigins, resolvedPort)) {
-      return sendError(reply, 403, 'ORIGIN_REJECTED', 'This browser origin is not allowed to access the local service.', request.id);
+      return sendError(reply, 403, 'ORIGIN_REJECTED', '该浏览器来源不允许访问本机服务。', request.id);
     }
     if (request.url === '/health' || request.url.startsWith('/health?') || request.url === `${API}/session/bootstrap`) return;
     if (!request.url.startsWith(API)) return;
@@ -143,12 +143,12 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
     const session = sessionId ? sessions.get(sessionId) : undefined;
     if (!session || session.expiresAt < Date.now()) {
       if (sessionId) sessions.delete(sessionId);
-      return sendError(reply, 401, 'AUTH_REQUIRED', 'Connect this browser to the local AgentDeck service first.', request.id);
+      return sendError(reply, 401, 'AUTH_REQUIRED', '请先将本浏览器连接到本机 AgentDeck 服务。', request.id);
     }
     if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
       const csrf = request.headers['x-csrf-token'];
       if (typeof csrf !== 'string' || csrf !== session.csrfToken) {
-        return sendError(reply, 403, 'CSRF_REJECTED', 'The request is missing a valid local-session CSRF token.', request.id);
+        return sendError(reply, 403, 'CSRF_REJECTED', '请求缺少有效的本机会话 CSRF token。', request.id);
       }
     }
   });
@@ -157,11 +157,11 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
 
   app.post(`${API}/session/bootstrap`, async (request, reply) => {
     const parsed = BootstrapSchema.safeParse(request.body);
-    if (!parsed.success) throw new ManagerError(400, 'INVALID_REQUEST', 'A valid one-time bootstrap ticket is required.');
+    if (!parsed.success) throw new ManagerError(400, 'INVALID_REQUEST', '需要有效的一次性启动票据。');
     const ticket = parsed.data.ticket;
     const record = tickets.get(ticket);
     tickets.delete(ticket);
-    if (!record || record.expiresAt < Date.now()) throw new ManagerError(401, 'BOOTSTRAP_EXPIRED', 'The local startup ticket is invalid or expired.');
+    if (!record || record.expiresAt < Date.now()) throw new ManagerError(401, 'BOOTSTRAP_EXPIRED', '本机启动票据无效或已过期。');
     const sessionId = randomBytes(32).toString('base64url');
     const csrfToken = randomBytes(32).toString('base64url');
     sessions.set(sessionId, { csrfToken, expiresAt: Date.now() + SESSION_TTL_MS });
@@ -177,9 +177,10 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
   app.get(`${API}/adapters`, async () => manager.adapterInfos());
   app.get(`${API}/compatibility`, async () => manager.compatibilityReport());
   app.get(`${API}/catalog`, async () => manager.catalog());
+  app.get(`${API}/runtime`, async () => manager.runtimeReport());
   app.post(`${API}/instances`, async (request, reply) => {
     const input = RegisterInstanceSchema.safeParse(request.body);
-    if (!input.success) throw new ManagerError(400, 'INVALID_REQUEST', input.error.issues[0]?.message ?? 'Invalid instance registration.');
+    if (!input.success) throw new ManagerError(400, 'INVALID_REQUEST', input.error.issues[0]?.message ?? '实例登记请求无效。');
     const result = manager.registerInstance({
       agentId: input.data.agentId,
       configRoot: input.data.configRoot,
@@ -192,7 +193,7 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
   });
   app.post(`${API}/projects`, async (request, reply) => {
     const input = RegisterProjectSchema.safeParse(request.body);
-    if (!input.success) throw new ManagerError(400, 'INVALID_REQUEST', input.error.issues[0]?.message ?? 'Invalid project registration.');
+    if (!input.success) throw new ManagerError(400, 'INVALID_REQUEST', input.error.issues[0]?.message ?? '项目登记请求无效。');
     const result = manager.registerProject({
       rootPath: input.data.rootPath,
       ...(input.data.name === undefined ? {} : { name: input.data.name }),
@@ -203,7 +204,7 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
   });
   app.post(`${API}/scans`, async (request) => {
     const input = ScanRequestSchema.safeParse(request.body ?? {});
-    if (!input.success) throw new ManagerError(400, 'INVALID_REQUEST', 'Invalid scan request.');
+    if (!input.success) throw new ManagerError(400, 'INVALID_REQUEST', '扫描请求无效。');
     const catalog = await manager.scan({
       discover: input.data.discover || input.data.discoverUserHome,
       ...(input.data.discoverUserHome ? { discoveryContext: {
@@ -218,7 +219,7 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
   });
   app.post(`${API}/instances/:id/version-check`, async (request) => {
     const body = VersionCheckRequestSchema.safeParse(request.body ?? {});
-    if (!body.success) throw new ManagerError(400, 'INVALID_REQUEST', 'Version checks do not accept a command or executable from the client.');
+    if (!body.success) throw new ManagerError(400, 'INVALID_REQUEST', '版本检查不接受来自浏览器的命令或可执行路径。');
     const { id } = request.params as { id: string };
     const report = await manager.checkVersion(id);
     await manager.scan({ instanceId: id });
@@ -234,31 +235,31 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
 
   app.post(`${API}/plans`, async (request, reply) => {
     const input = CreatePlanSchema.safeParse(request.body);
-    if (!input.success) throw new ManagerError(400, 'INVALID_REQUEST', 'A binding ID and desired enabled state are required.');
+    if (!input.success) throw new ManagerError(400, 'INVALID_REQUEST', '需要绑定 ID 与目标启用状态。');
     let binding = store.getBinding(input.data.bindingId);
-    if (!binding) throw new ManagerError(404, 'BINDING_NOT_FOUND', 'The selected resource binding no longer exists.');
+    if (!binding) throw new ManagerError(404, 'BINDING_NOT_FOUND', '所选资源绑定已不存在。');
     let instance = store.getInstance(binding.instanceId);
-    if (!instance || instance.agentId !== 'codex') throw new ManagerError(403, 'UNSUPPORTED_OPERATION', 'Only supported Codex resources can be changed.');
+    if (!instance || instance.agentId !== 'codex') throw new ManagerError(403, 'UNSUPPORTED_OPERATION', '只有受支持的 Codex 资源可以修改。');
     if (binding.kind !== 'mcp') {
       await manager.compatibilityReport();
       instance = store.getInstance(binding.instanceId)!;
       await manager.scan({ instanceId: instance.id });
       binding = store.getBinding(input.data.bindingId);
-      if (!binding) throw new ManagerError(404, 'BINDING_NOT_FOUND', 'The selected resource no longer exists.');
+      if (!binding) throw new ManagerError(404, 'BINDING_NOT_FOUND', '所选资源已不存在。');
     }
     const independentMcp = binding.kind === 'mcp' && binding.parentId === null && binding.projectId === null && binding.scope === 'native' && binding.sourceKind === 'user';
     const supportedSkill = binding.kind === 'skill' && binding.controlScope === 'user-config-skill' && binding.parentId === null && binding.projectId === null && binding.scope === 'user-global' && binding.sourceKind === 'user';
     const supportedPlugin = binding.kind === 'plugin' && binding.controlScope === 'local-marketplace-plugin' && binding.parentId === null && binding.projectId === null && binding.origin === 'cache' && Boolean(binding.pluginId);
     if (!independentMcp && !supportedSkill && !supportedPlugin) {
-      throw new ManagerError(403, 'UNSUPPORTED_OPERATION', binding.readOnlyReason ?? 'This resource has no verified control mechanism.');
+      throw new ManagerError(403, 'UNSUPPORTED_OPERATION', binding.readOnlyReason ?? '该资源没有已验证的控制方式。');
     }
-    if (!independentMcp && !verifiedBasicCodex(instance)) throw new ManagerError(403, 'POLICY_LOCKED', 'This control requires checked Codex CLI 0.159.2 on Windows.');
+    if (!independentMcp && !verifiedBasicCodex(instance)) throw new ManagerError(403, 'POLICY_LOCKED', '该控制要求已检查的 Codex CLI 0.159.2 / Windows。');
     const isolatedDemo = instance.discovery === 'demo' && isWithin(binding.sourcePath, manager.demoDir);
     if (!isolatedDemo && (instance.discovery !== 'manual' || !instance.writable || !binding.writable)) {
-      throw new ManagerError(403, 'POLICY_LOCKED', binding.readOnlyReason ?? 'Write access requires an explicitly registered writable Codex instance.');
+      throw new ManagerError(403, 'POLICY_LOCKED', binding.readOnlyReason ?? '写入需要显式登记为可写的 Codex 实例。');
     }
     const configPath = independentMcp ? binding.sourcePath : path.join(instance.configRoot, 'config.toml');
-    if (!isWithin(binding.sourcePath, instance.configRoot) || !isWithin(configPath, instance.configRoot)) throw new ManagerError(403, 'PATH_OUTSIDE_SCOPE', 'The binding file is outside the registered Codex configuration root.');
+    if (!isWithin(binding.sourcePath, instance.configRoot) || !isWithin(configPath, instance.configRoot)) throw new ManagerError(403, 'PATH_OUTSIDE_SCOPE', '绑定文件在已登记的 Codex 配置根之外。');
     const target: defaultChangeEngine.CodexToggleTarget | undefined = supportedSkill ? { kind: 'skill', path: path.join(binding.sourcePath, 'SKILL.md') }
       : supportedPlugin ? { kind: 'plugin', id: binding.pluginId! } : undefined;
     let enginePlan: PreparedChange;
@@ -276,17 +277,17 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
   app.post(`${API}/plans/:id/apply`, async (request) => {
     const { id } = request.params as { id: string };
     const input = ApplyPlanSchema.safeParse(request.body);
-    if (!input.success) throw new ManagerError(400, 'INVALID_REQUEST', 'The plan digest is required.');
+    if (!input.success) throw new ManagerError(400, 'INVALID_REQUEST', '需要提交计划摘要。');
     const stored = store.getPlan(id);
-    if (!stored) throw new ManagerError(404, 'PLAN_NOT_FOUND', 'The change plan does not exist.');
-    if (input.data.digest !== stored.dto.afterHash) throw new ManagerError(409, 'PLAN_DIGEST_MISMATCH', 'The submitted plan digest does not match the reviewed plan.');
+    if (!stored) throw new ManagerError(404, 'PLAN_NOT_FOUND', '变更计划不存在。');
+    if (input.data.digest !== stored.dto.afterHash) throw new ManagerError(409, 'PLAN_DIGEST_MISMATCH', '提交的摘要与已核对计划不一致。');
     if (stored.dto.status === 'applied') {
       const previous = store.listOperations().find(operation => operation.planId === id);
       if (previous) return previous;
     }
     if (stored.dto.expiresAt && Date.parse(stored.dto.expiresAt) < Date.now()) {
       store.updatePlanStatus(id, 'expired');
-      throw new ManagerError(410, 'PLAN_EXPIRED', 'The change plan expired; create a new plan from the current configuration.');
+      throw new ManagerError(410, 'PLAN_EXPIRED', '变更计划已过期；请基于当前配置重新创建计划。');
     }
     const controlledTarget = (stored.privateData as defaultChangeEngine.PreparedChange).private?.target;
     if (controlledTarget) {
@@ -298,7 +299,7 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
         || path.resolve(stored.dto.targetPath) !== path.resolve(currentInstance.configRoot, 'config.toml')
         || (controlledTarget.kind === 'skill' ? currentBinding.controlScope !== 'user-config-skill' || controlledTarget.path !== path.join(currentBinding.sourcePath, 'SKILL.md')
           : currentBinding.controlScope !== 'local-marketplace-plugin' || currentBinding.pluginId !== controlledTarget.id)) {
-        throw new ManagerError(403, 'POLICY_LOCKED', 'The resource write permission or verified client scope changed; create a new plan after verifying it.');
+        throw new ManagerError(403, 'POLICY_LOCKED', '资源写入许可或已验证客户端范围已变化；请检查后重新创建计划。');
       }
     }
     let applied: ApplyResult;
@@ -323,7 +324,7 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
     await manager.scan({ instanceId: plan.instanceId, ...(priorBinding?.projectId ? { projectId: priorBinding.projectId } : {}) });
     const refreshedBinding = store.getBinding(plan.bindingId);
     if (refreshedBinding && plan.desiredEnabled !== null) {
-      store.putBinding({ ...refreshedBinding, enabled: plan.desiredEnabled, runtime: 'pending', updatedAt: (options.now?.() ?? new Date()).toISOString() });
+      store.putBinding({ ...refreshedBinding, enabled: plan.desiredEnabled, runtime: 'unknown', updatedAt: (options.now?.() ?? new Date()).toISOString() });
     }
     app.agentdeckEvents.publish({ type: 'operation.completed', operationId: applied.operation.id, instanceId: plan.instanceId, payload: { operation: applied.operation } });
     app.agentdeckEvents.publish({ type: 'catalog.changed', instanceId: plan.instanceId, payload: { kind: 'operation', operationId: applied.operation.id } });
@@ -332,11 +333,11 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
   app.get(`${API}/operations`, async () => store.listOperations());
   app.post(`${API}/operations/:id/restore-plan`, async (request, reply) => {
     const { id } = request.params as { id: string };
-    if (!store.getOperation(id)) throw new ManagerError(404, 'OPERATION_NOT_FOUND', 'The selected operation does not exist.');
+    if (!store.getOperation(id)) throw new ManagerError(404, 'OPERATION_NOT_FOUND', '所选操作不存在。');
     let prepared: PreparedChange;
     const operation = store.getOperation(id)!;
     const originalPlan = store.getPlan(operation.planId);
-    if (!originalPlan) throw new ManagerError(409, 'RECOVERY_CONFLICT', 'The original plan metadata is unavailable for recovery.');
+    if (!originalPlan) throw new ManagerError(409, 'RECOVERY_CONFLICT', '恢复所需的原始计划元数据不可用。');
     try {
       prepared = await engine.prepareRestore({ operationId: id, dataDir, ...(options.now ? { now: options.now() } : {}) });
     } catch (error) {
@@ -384,7 +385,7 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
     const managerError = error instanceof ManagerError ? error : null;
     const status = managerError?.statusCode ?? (Number.isInteger((error as { statusCode?: number }).statusCode) ? (error as { statusCode: number }).statusCode : 500);
     const code = managerError?.code ?? (status === 400 ? 'INVALID_REQUEST' : status === 404 ? 'NOT_FOUND' : 'INTERNAL_ERROR');
-    const message = managerError?.message ?? 'The local service could not complete this request.';
+    const message = managerError?.message ?? '本机服务无法完成该请求。';
     sendError(reply, status, code, message, request.id);
   });
 
@@ -392,13 +393,13 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
   if (existsSync(staticDir)) {
     void app.register(fastifyStatic, { root: staticDir, prefix: '/' });
     app.setNotFoundHandler((request, reply) => {
-      if (request.url.startsWith(API)) return sendError(reply, 404, 'NOT_FOUND', 'The requested API route does not exist.', request.id);
+      if (request.url.startsWith(API)) return sendError(reply, 404, 'NOT_FOUND', '请求的 API 路由不存在。', request.id);
       return reply.sendFile('index.html');
     });
   } else {
     app.setNotFoundHandler((request, reply) => {
-      if (request.url.startsWith(API)) return sendError(reply, 404, 'NOT_FOUND', 'The requested API route does not exist.', request.id);
-      return reply.type('text/html').send('<!doctype html><html><body><h1>AgentDeck</h1><p>The web application has not been built yet. Run <code>pnpm dev</code> in development.</p></body></html>');
+      if (request.url.startsWith(API)) return sendError(reply, 404, 'NOT_FOUND', '请求的 API 路由不存在。', request.id);
+      return reply.type('text/html').send('<!doctype html><html lang="zh-CN"><body><h1>AgentDeck</h1><p>网页尚未构建；开发模式请先运行 <code>pnpm dev</code>。</p></body></html>');
     });
   }
 
@@ -443,7 +444,7 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
             store.putBinding({
               ...refreshedBinding,
               enabled: originalPlan.dto.desiredEnabled,
-              runtime: 'pending',
+              runtime: 'unknown',
               updatedAt: (options.now?.() ?? new Date()).toISOString(),
             });
           }
@@ -457,7 +458,7 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
         }
       } catch {
         // A failed journal audit does not mutate client files; keep a generic local status for diagnosis.
-        store.setMetadata('lastRecoveryReport', JSON.stringify({ status: 'failed', message: 'Startup recovery audit failed.' }));
+        store.setMetadata('lastRecoveryReport', JSON.stringify({ status: 'failed', message: '启动恢复审计失败。' }));
       }
     }
   });
@@ -556,7 +557,7 @@ function conflictOperation(plan: ChangePlan, errorMessage: string, now: Date): O
 function sanitizedEngineError(error: unknown): { status: number; code: string; message: string } {
   const value = error as { code?: unknown; safeMessage?: unknown; message?: unknown };
   const code = typeof value?.code === 'string' ? value.code : 'INTERNAL_ERROR';
-  const message = typeof value?.safeMessage === 'string' ? value.safeMessage : 'The change could not be completed safely.';
+  const message = typeof value?.safeMessage === 'string' ? value.safeMessage : '无法安全完成该变更。';
   const statuses: Record<string, number> = {
     CONFIG_CHANGED: 409, PATH_CHANGED: 409, RECOVERY_CONFLICT: 409, LOCKED: 409,
     PLAN_EXPIRED: 410, AMBIGUOUS_TARGET: 422, INVALID_CONFIG: 422, IO_ERROR: 500,

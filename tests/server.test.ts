@@ -89,6 +89,7 @@ describe('local API with actual network peers and isolated configuration', () =>
 
   it('requires a session and CSRF token and consumes bootstrap tickets once', async () => {
     expect((await call('GET', '/api/v1/catalog', undefined, false)).status).toBe(401);
+    expect((await call('GET', '/api/v1/runtime', undefined, false)).status).toBe(401);
     expect((await call('POST', '/api/v1/demo', {}, true, { 'X-CSRF-Token': '' })).status).toBe(403);
     const ticket = app.agentdeckAuth.issueBootstrapTicket();
     expect((await call('POST', '/api/v1/session/bootstrap', { ticket }, false)).status).toBe(200);
@@ -146,6 +147,21 @@ describe('local API with actual network peers and isolated configuration', () =>
     expect(new Set(rows.map(item => item.id)).size).toBe(rows.length);
     const rescanned = await call<Catalog>('POST', '/api/v1/scans', { instanceId: instance.id });
     expect((rescanned.body as Catalog).bindings.some(item => item.name === 'project-review' && item.projectId === projectId)).toBe(true);
+  });
+
+  it('reports missing client-session evidence without probing configured MCP servers', async () => {
+    const { binding } = await writableCodex();
+    const before = await fileTreeDigests(home);
+    const response = await call<{ observations: Array<{ bindingId: string; configurationEnabled: boolean | null; mcpConnection: string; clientSessionId: string | null; observedAt: string | null; reason: string }> }>('GET', '/api/v1/runtime');
+    expect(response.status).toBe(200);
+    const observation = response.body.observations.find(item => item.bindingId === binding.id);
+    expect(observation?.configurationEnabled).toBe(binding.enabled);
+    expect(observation?.mcpConnection).toBe('not-checked');
+    expect(observation?.clientSessionId).toBeNull();
+    expect(observation?.observedAt).toBeNull();
+    expect(observation?.reason).toContain('现有会话');
+    expect(JSON.stringify(response.body)).not.toContain('AGENTDECK_SECRET_SENTINEL');
+    expect(await fileTreeDigests(home)).toEqual(before);
   });
 
   it('refreshes removed global and selected-project sources while retaining another project', async () => {

@@ -31,7 +31,7 @@ export function deserializePreparedChange(serialized: string): PreparedChange {
   const value = JSON.parse(serialized) as SerializedPreparedChange;
   if (value.schemaVersion !== 1 || !value.plan || !value.private
     || typeof value.private.originalBytesBase64 !== 'string'
-    || typeof value.private.updatedBytesBase64 !== 'string') throw new Error('Invalid serialized prepared change.');
+    || typeof value.private.updatedBytesBase64 !== 'string') throw new Error('序列化的已准备变更无效。');
   return {
     plan: value.plan,
     private: {

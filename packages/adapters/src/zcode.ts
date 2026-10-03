@@ -19,8 +19,8 @@ function addServers(context: ScanContext, file: string, config: unknown, source:
       enabled: typeof server?.enabled === 'boolean' ? server.enabled : null,
       origin: 'configuration', configurationSourcePath: file, configurationKey: `mcp.servers.${name}`,
       configurationEnabled: typeof server?.enabled === 'boolean' ? server.enabled : null, cacheState: 'unknown',
-      diagnostics: server ? [] : ['MCP server entry is not a static object.'],
-      readOnlyReason: 'ZCode MCP settings are read-only until a native write path is validated.',
+      diagnostics: server ? [] : ['MCP 服务器条目不是静态对象。'],
+      readOnlyReason: '在验证原生写入方式前，ZCode MCP 设置保持只读。',
     });
   });
 }
@@ -42,8 +42,8 @@ function addEnabledPluginConfigurations(context: ScanContext, file: string, conf
       origin: 'configuration', pluginId: identity, ...(parts ? { marketplace: parts[2] } : {}),
       configurationSourcePath: file, configurationKey: key, configurationEnabled: enabled,
       cacheState: 'unknown',
-      diagnostics: typeof raw === 'boolean' ? [] : ['ZCode enabledPlugins value is not a static boolean.'],
-      readOnlyReason: 'ZCode plugin activation is read-only until its native behavior is validated.',
+      diagnostics: typeof raw === 'boolean' ? [] : ['ZCode enabledPlugins 值不是静态布尔值。'],
+      readOnlyReason: '在验证原生行为前，ZCode 插件启用状态保持只读。',
     });
   });
 }
@@ -64,14 +64,14 @@ async function scanPluginDirs(context: ScanContext, root: string, diagnostics: s
       sourcePath: manifestPath, nativeKey: `plugin-dir:${path.resolve(dir)}`,
       enabled: null, configurationEnabled: null,
       origin: 'filesystem', cacheState: 'unknown',
-      readOnlyReason: 'ZCode plugin activation is not changed by the read-only adapter.',
+      readOnlyReason: '只读适配器不修改 ZCode 插件启用状态。',
     });
     bindings.push(parent);
 
     const skillDeclarations = typeof manifest?.skills === 'string' ? [manifest.skills] : ['./skills'];
     for (const declaration of skillDeclarations) {
       const candidate = declaredPath(dir, declaration);
-      if (!candidate) { diagnostics.push('ZCode plugin Skill declaration escapes or is not a relative path inside its package.'); continue; }
+      if (!candidate) { diagnostics.push('ZCode 插件 Skill 声明越界或不是包内相对路径。'); continue; }
       if (!(await isSafePathWithin(context.instance.configRoot, candidate))) continue;
       bindings.push(...await scanSkillRoot({ root: candidate, context, scope: 'native', sourceKind: 'plugin', parentId: parent.id, projectId: null, origin: 'filesystem', diagnostics }));
     }
@@ -83,8 +83,8 @@ async function scanPluginDirs(context: ScanContext, root: string, diagnostics: s
           sourcePath: manifestPath, nativeKey: `plugin:${name}.mcpServers.${serverName}`, parentId: parent.id,
           enabled: null, configurationEnabled: null,
           origin: 'filesystem', cacheState: 'unknown',
-          diagnostics: ['No exact name@marketplace configuration identity was available for this filesystem plugin.'],
-          readOnlyReason: 'Plugin MCP entries are read-only and cannot be changed independently.',
+          diagnostics: ['该文件系统插件没有可用的精确 name@marketplace 配置身份。'],
+          readOnlyReason: '插件 MCP 条目只读，不能独立修改。',
         }));
       }
     }
@@ -95,7 +95,7 @@ async function scanPluginDirs(context: ScanContext, root: string, diagnostics: s
 async function scanFile(context: ScanContext, file: string, boundary: string, source: 'user' | 'repository', bindings: Binding[], diagnostics: string[]): Promise<void> {
   if (!(await existsRegularFile(file))) return;
   if (!(await isSafePathWithin(boundary, file))) {
-    diagnostics.push('ZCode configuration crosses a symlink or junction and was skipped.');
+    diagnostics.push('ZCode 配置跨越符号链接或 junction，已跳过。');
     return;
   }
   const parsed = await safeMcpFile<unknown>(file, diagnostics, source === 'user' ? 'ZCode user config' : 'ZCode project config');
@@ -106,7 +106,7 @@ export const zcodeAdapter: AgentAdapter = {
   id: 'zcode',
   name: 'ZCode',
   info: {
-    id: 'zcode', name: 'Official ZCode CLI', description: 'Read-only bounded scanner for the official ZCode CLI config and local extensions.',
+    id: 'zcode', name: 'Official ZCode CLI', description: '针对官方 ZCode CLI 配置与本地扩展的只读有限扫描。',
     supportedKinds: ['skill', 'plugin', 'mcp'], writeSupport: [],
   },
   async discover({ homeDir, env }) {

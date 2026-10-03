@@ -12,6 +12,7 @@ import {
   type ExecutableResolver, type VersionCheckRunner,
 } from './version-check.js';
 import { buildCapabilityEvidence } from './compatibility.js';
+import { assessRuntimeEvidence } from './runtime.js';
 
 type RegisterInstanceInput = { agentId: string; name?: string; configRoot: string; writable?: boolean };
 type RegisterProjectInput = { name?: string; rootPath: string };
@@ -66,6 +67,7 @@ export class ManagerService {
   }
 
   catalog(): Catalog { return this.store.catalog(); }
+  runtimeReport() { return assessRuntimeEvidence(this.store.catalog(), this.now()); }
   adapterInfos(): AdapterInfo[] { return this.adapters.map(adapter => adapter.info); }
 
   async compatibilityReport(): Promise<CompatibilityReport> {
@@ -87,7 +89,7 @@ export class ManagerService {
           executableCandidate: candidate, versionEvidence: null, checkedAt: null,
           capabilities: buildCapabilityEvidence({ agentId, versionEvidence: null, optedInCodexWrite: false }),
           diagnostics: [
-            ...(candidate ? ['A PATH executable candidate exists; no recognized client version has been checked. This does not prove an official installation.'] : []),
+            ...(candidate ? ['存在 PATH 可执行候选；尚未检查出已识别的客户端版本。这不证明官方安装。'] : []),
             ...(configurationState === 'present' && !candidate ? ['The configuration directory exists, but no PATH executable candidate was found.'] : []),
           ],
         });
@@ -100,10 +102,10 @@ export class ManagerService {
 
   async checkVersion(instanceId: string): Promise<CompatibilityReport> {
     const instance = this.store.getInstance(instanceId);
-    if (!instance) throw new ManagerError(404, 'INSTANCE_NOT_FOUND', 'The selected Agent instance is not registered.');
+    if (!instance) throw new ManagerError(404, 'INSTANCE_NOT_FOUND', '所选 Agent 实例未登记。');
     if (instance.discovery === 'demo') {
-      const diagnostics = instance.diagnostics.filter(item => !item.startsWith('Version check:'));
-      diagnostics.push('Version check: isolated demo instances do not probe host executables.');
+      const diagnostics = instance.diagnostics.filter(item => !item.startsWith('版本检查：'));
+      diagnostics.push('版本检查：隔离演示实例不探测主机可执行文件。');
       this.store.putInstance({ ...instance, version: null, executable: null, versionEvidence: null, diagnostics });
       return this.compatibilityReport();
     }
@@ -117,9 +119,9 @@ export class ManagerService {
       const executable = await this.executableResolver(agentId, this.env);
       candidate = executable ? await inspectExecutable(executable, checkedAt) : null;
       if (!candidate) {
-        message = 'Version check: no executable candidate was found on the service PATH.';
+        message = '版本检查：服务 PATH 上未发现可执行候选。';
       } else if (agentId !== 'codex' && agentId !== 'claude-code') {
-        message = 'Version check: no validated version command is available for this client.';
+        message = '版本检查：该客户端没有已验证的版本检查命令。';
       } else {
         const isolated = await this.createIsolatedVersionEnvironment(agentId, instanceId);
         try {
@@ -129,24 +131,24 @@ export class ManagerService {
           });
           const parsed = output.exitCode === 0 ? parseRecognizedVersion(agentId, output.stdout) : null;
           if (!parsed) {
-            message = 'Version check: output did not match the exact recognized CLI version signature.';
+            message = '版本检查：输出未匹配已识别的 CLI 版本签名。';
           } else {
             versionEvidence = { ...parsed, executable: candidate, platform: this.platform, checkedAt };
           }
         } catch {
-          message = 'Version check: the isolated version command failed, timed out, or exceeded its output limit.';
+          message = '版本检查：隔离版本命令失败、超时或超出输出上限。';
         } finally {
           await rm(isolated.directory, { recursive: true, force: true }).catch(() => undefined);
         }
       }
     } catch {
-      message = 'Version check: the service could not resolve or inspect a PATH executable candidate.';
+      message = '版本检查：服务无法解析或检查 PATH 可执行候选。';
     }
     const confirmedCandidate = candidate ? await inspectExecutable(candidate.path, checkedAt) : null;
     const confirmedEvidence = versionEvidence && sameExecutable(candidate, confirmedCandidate) ? versionEvidence : null;
-    if (versionEvidence && !confirmedEvidence) message = 'Version check: the executable changed while its version was being checked; stored version evidence was discarded.';
+    if (versionEvidence && !confirmedEvidence) message = '版本检查：检查期间可执行文件发生变化，已丢弃存储的版本证据。';
     const latestInstance = this.store.getInstance(instanceId) ?? instance;
-    const diagnostics = latestInstance.diagnostics.filter(item => !item.startsWith('Version check:'));
+    const diagnostics = latestInstance.diagnostics.filter(item => !item.startsWith('版本检查：'));
     if (message) diagnostics.push(message);
     this.store.putInstance({
       ...latestInstance,
@@ -173,9 +175,9 @@ export class ManagerService {
           : configurationState === 'present' ? 'configuration-only' : 'not-found';
     const diagnostics = [
       ...instance.diagnostics,
-      ...(status === 'verified-client' ? ['The exact CLI version output signature was recognized; this does not verify publisher identity, desktop-app installation, or resource runtime state.'] : []),
-      ...(status === 'executable-unverified' ? ['A PATH executable candidate exists, but its CLI version output has not been recognized. This does not prove an official installation.'] : []),
-      ...(status === 'configuration-only' ? ['The configuration root is a directory, but no PATH executable candidate was found.'] : []),
+      ...(status === 'verified-client' ? ['已识别精确的 CLI 版本输出签名；这不验证发行方身份、桌面应用安装或资源运行状态。'] : []),
+      ...(status === 'executable-unverified' ? ['存在 PATH 可执行候选，但其 CLI 版本输出未识别。这不证明官方安装。'] : []),
+      ...(status === 'configuration-only' ? ['配置根是目录，但 PATH 上未发现可执行候选。'] : []),
     ];
     if (instance.versionEvidence && !versionEvidence) {
       const latest = this.store.getInstance(instance.id) ?? instance;
@@ -225,7 +227,7 @@ export class ManagerService {
       version: retainedEvidence?.version ?? null,
       versionEvidence: retainedEvidence,
       checkedAt,
-      diagnostics: latest.diagnostics.filter(item => !item.startsWith('Version check:')),
+      diagnostics: latest.diagnostics.filter(item => !item.startsWith('版本检查：')),
     };
     this.store.putInstance(refreshed);
     return refreshed;
@@ -295,7 +297,7 @@ export class ManagerService {
 
   registerInstance(input: RegisterInstanceInput): AgentInstance {
     const adapter = this.adapter(input.agentId);
-    if (!adapter) throw new ManagerError(400, 'UNSUPPORTED_AGENT', `No adapter is registered for ${input.agentId}.`);
+    if (!adapter) throw new ManagerError(400, 'UNSUPPORTED_AGENT', `${input.agentId} 没有已注册的适配器。`);
     const configRoot = path.resolve(input.configRoot);
     const existing = this.store.catalog().instances.find(instance =>
       instance.agentId === input.agentId && canonical(instance.configRoot) === canonical(configRoot),
@@ -314,7 +316,7 @@ export class ManagerService {
       writable: input.writable === true && input.agentId === 'codex',
       checkedAt: this.now().toISOString(),
       diagnostics: [...(existing?.diagnostics ?? []), ...(input.writable === true && input.agentId !== 'codex'
-        ? ['This adapter has no first-round write support; registered read-only.']
+        ? ['该适配器本轮没有写入支持；登记为只读。']
         : [])],
     };
     this.store.putInstance(instance);
@@ -350,7 +352,7 @@ export class ManagerService {
           const oldEvidence = existing && validVersionEvidence(existing.versionEvidence, adapter.id as AgentId)
             && sameExecutable(existing.versionEvidence.executable, executable) ? existing.versionEvidence : null;
           const diagnostics = [...new Set([...(existing?.diagnostics ?? []), ...found.diagnostics])]
-            .filter(item => oldEvidence || !item.startsWith('Version check:'));
+            .filter(item => oldEvidence || !item.startsWith('版本检查：'));
           if (existing?.discovery === 'manual') {
             // Rediscovery refreshes identity but never revokes a deliberate write opt-in.
             this.store.putInstance({
@@ -379,12 +381,12 @@ export class ManagerService {
     }
 
     const project = input.projectId ? this.store.getProject(input.projectId) : null;
-    if (input.projectId && !project) throw new ManagerError(404, 'PROJECT_NOT_FOUND', 'The selected project is not registered.');
+    if (input.projectId && !project) throw new ManagerError(404, 'PROJECT_NOT_FOUND', '所选项目未登记。');
     const catalog = this.store.catalog();
     const instances = input.instanceId
       ? catalog.instances.filter(instance => instance.id === input.instanceId)
       : catalog.instances;
-    if (input.instanceId && instances.length === 0) throw new ManagerError(404, 'INSTANCE_NOT_FOUND', 'The selected Agent instance is not registered.');
+    if (input.instanceId && instances.length === 0) throw new ManagerError(404, 'INSTANCE_NOT_FOUND', '所选 Agent 实例未登记。');
 
     for (const instance of instances) {
       const adapter = this.adapter(instance.agentId);
@@ -399,7 +401,7 @@ export class ManagerService {
           ...binding,
           instanceId: instance.id,
           writable,
-          readOnlyReason: writable ? null : binding.readOnlyReason ?? (instance.discovery === 'auto' ? 'Automatically discovered instances are read-only.' : 'This resource has no verified write mechanism.'),
+          readOnlyReason: writable ? null : binding.readOnlyReason ?? (instance.discovery === 'auto' ? '自动发现的实例固定只读。' : '该资源没有已验证的写入机制。'),
           runtime: binding.runtime ?? 'unknown',
           diagnostics: [...binding.diagnostics, ...report.diagnostics],
           updatedAt: this.now().toISOString(),
@@ -417,7 +419,7 @@ export class ManagerService {
       } catch {
         // Preserve the last known index when an adapter cannot complete a scan.
         const prior = this.store.getInstance(instance.id);
-        if (prior) this.store.putInstance({ ...prior, diagnostics: [...prior.diagnostics, 'Scanning failed; the previous index was retained.'] });
+        if (prior) this.store.putInstance({ ...prior, diagnostics: [...prior.diagnostics, '扫描失败；保留上一次的索引。'] });
       }
     }
     this.store.setMetadata('lastScanAt', this.now().toISOString());
@@ -441,7 +443,7 @@ export class ManagerService {
         name: sample.name, configRoot, version: null, executable: null,
         discovery: 'demo', writable: sample.agentId === 'codex',
         checkedAt: this.now().toISOString(),
-        diagnostics: ['Isolated demo files; no real Agent configuration is touched.', 'Client-version compatibility is experimental and has not been verified.'],
+        diagnostics: ['隔离演示文件；不触碰真实 Agent 配置。', '客户端版本兼容性为实验性，尚未验收。'],
       };
       await mkdir(configRoot, { recursive: true });
       const skillDirectory = path.join(configRoot, 'skills', sample.skill);

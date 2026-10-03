@@ -74,7 +74,7 @@ test('registers a writable Codex root, checks its version and previews/applies/r
       await page.getByRole('button', { name: '关闭', exact: true }).click();
       await expect(page.getByRole('dialog')).toBeHidden();
       await expect(row.getByText('已停用', { exact: true })).toBeVisible();
-      await expect(row.getByText('等待生效', { exact: true })).toBeVisible();
+      await expect(row.getByText('暂未检测', { exact: true })).toBeVisible();
       await mkdir('work/browser-proof', { recursive: true });
       await page.screenshot({ path: `work/browser-proof/basic-${name}.png`, fullPage: true });
       await page.getByRole('button', { name: /^操作记录/ }).click();

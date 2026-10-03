@@ -71,22 +71,22 @@ function stableRowKey(sourcePath: string, rawId: string | null, rowIndex: number
 
 async function scanProfilePatch(context: ScanContext, file: string, boundary: string, profile: string, projectScope: boolean, diagnostics: string[]): Promise<Binding[]> {
   if (!(await isSafePathWithin(boundary, file))) {
-    diagnostics.push(`DSH profile "${profile}" crosses a symlink or junction and was skipped.`);
+    diagnostics.push(`DSH profile "${profile}" 跨越符号链接或 junction，已跳过。`);
     return [];
   }
   let sourceText: string;
   try { sourceText = await boundedText(file); }
   catch {
-    diagnostics.push(`DSH profile "${profile}" has an unreadable or oversized patch; its entries were skipped.`);
+    diagnostics.push(`DSH profile "${profile}" 的 patch 不可读或超限，其条目已跳过。`);
     return [];
   }
   const document = parseDocument(sourceText, { customTags: CUSTOM_TAGS, schema: 'core' });
   if (document.errors.length > 0) {
-    diagnostics.push(`DSH profile "${profile}" contains invalid YAML; its entries were skipped.`);
+    diagnostics.push(`DSH profile "${profile}" 包含非法 YAML，其条目已跳过。`);
     return [];
   }
   if (!isSeq(document.contents)) {
-    diagnostics.push(`DSH profile "${profile}" does not use a supported static plugin-row sequence; its entries were skipped.`);
+    diagnostics.push(`DSH profile "${profile}" 未使用受支持的静态插件行序列，其条目已跳过。`);
     return [];
   }
   const bindings: Binding[] = [];
@@ -103,8 +103,8 @@ async function scanProfilePatch(context: ScanContext, file: string, boundary: st
     const sourceKind = projectScope ? 'repository' : 'user';
     const projectId = projectScope ? context.project?.id ?? null : null;
     const rowDiagnostics: string[] = [];
-    if (!rawId) rowDiagnostics.push('This DSH patch row has no static id; the binding identity uses its bounded row position and content digest.');
-    if (disabled === null) rowDiagnostics.push('The DSH disabled value is missing or dynamic; effective configuration state is unknown.');
+    if (!rawId) rowDiagnostics.push('该 DSH patch 行没有静态 id；绑定身份使用其有限行位置与内容摘要。');
+    if (disabled === null) rowDiagnostics.push('DSH disabled 值缺失或为动态表达式；有效配置状态未知。');
     const parent = baseBinding({
       context, kind: 'plugin', name: packageName ?? `DSH profile row ${index + 1}`, scope, sourceKind,
       projectId, sourcePath: file, nativeKey: `profiles.${profile}.plugins.${id}`,
@@ -113,7 +113,7 @@ async function scanProfilePatch(context: ScanContext, file: string, boundary: st
       configurationKey: `profiles.${profile}.plugins.${id}`, configurationEnabled: state,
       cacheState: 'unknown',
       diagnostics: rowDiagnostics,
-      readOnlyReason: 'DSH profile patch entries are read-only until the official manager semantics are validated.',
+      readOnlyReason: '在验证官方 manager 语义前，DSH profile patch 条目保持只读。',
     });
     bindings.push(parent);
 
@@ -121,7 +121,7 @@ async function scanProfilePatch(context: ScanContext, file: string, boundary: st
     const config = mapValue(row, 'config');
     const serverName = staticString(mapValue(config, 'serverName'));
     if (!serverName) {
-      diagnostics.push(`DSH MCP row "${id}" has no static server name; it was not exposed as an MCP binding.`);
+      diagnostics.push(`DSH MCP 行 "${id}" 没有静态服务器名；未暴露为 MCP 绑定。`);
       continue;
     }
     bindings.push(baseBinding({
@@ -132,7 +132,7 @@ async function scanProfilePatch(context: ScanContext, file: string, boundary: st
       configurationKey: `profiles.${profile}.plugins.${id}.config.serverName`, configurationEnabled: state,
       cacheState: 'unknown',
       diagnostics: state === null ? rowDiagnostics : [],
-      readOnlyReason: 'This MCP server is a child of a DSH plugin row and cannot be changed independently.',
+      readOnlyReason: '该 MCP 服务器隶属 DSH 插件行，不能独立修改。',
     }));
   }
   return bindings;
@@ -141,7 +141,7 @@ async function scanProfilePatch(context: ScanContext, file: string, boundary: st
 async function scanProfiles(context: ScanContext, boundary: string, root: string, projectScope: boolean, diagnostics: string[]): Promise<Binding[]> {
   const bindings: Binding[] = [];
   if (!(await isSafePathWithin(boundary, root))) {
-    if (await existsDirectory(root)) diagnostics.push('DSH profiles cross a symlink or junction and were skipped.');
+    if (await existsDirectory(root)) diagnostics.push('DSH profiles 跨越符号链接或 junction，已跳过。');
     return bindings;
   }
   for (const directory of await directDirectories(root)) {
@@ -161,7 +161,7 @@ export const deepSeekHarnessAdapter: AgentAdapter = {
   name: 'DeepSeek Harness',
   info: {
     id: 'deepseek-harness', name: 'DeepSeek Harness',
-    description: 'Read-only bounded scan of DSH profile patch rows and filesystem Skills; expressions are never evaluated.',
+    description: '对 DSH profile patch 行与文件系统 Skills 的只读有限扫描；不执行任何表达式。',
     supportedKinds: ['skill', 'plugin', 'mcp'], writeSupport: [],
   },
   async discover({ homeDir, env }) {
@@ -181,7 +181,7 @@ export const deepSeekHarnessAdapter: AgentAdapter = {
         sourceKind: 'user', projectId: null, diagnostics,
       }));
     } else if (await existsDirectory(globalSkillsRoot)) {
-      diagnostics.push('DSH user Skills root crosses a symlink or junction and was skipped.');
+      diagnostics.push('DSH 用户 Skills 根目录跨越符号链接或 junction，已跳过。');
     }
     bindings.push(...await scanProfiles(context, root, path.join(root, 'profiles'), false, diagnostics));
     if (context.project) {
@@ -192,7 +192,7 @@ export const deepSeekHarnessAdapter: AgentAdapter = {
           sourceKind: 'repository', projectId: context.project.id, diagnostics,
         }));
       } else if (await existsDirectory(projectSkillsRoot)) {
-        diagnostics.push('DSH project Skills root crosses a symlink or junction and was skipped.');
+        diagnostics.push('DSH 项目 Skills 根目录跨越符号链接或 junction，已跳过。');
       }
       const projectDshRoot = path.join(context.project.rootPath, '.dsh');
       bindings.push(...await scanProfiles(context, context.project.rootPath, path.join(projectDshRoot, 'profiles'), true, diagnostics));

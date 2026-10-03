@@ -11,6 +11,7 @@ import type {
   ExecutableIdentity,
   Operation,
   Project,
+  RuntimeReport,
   SessionResponse,
 } from '@agentdeck/contracts';
 
@@ -114,6 +115,22 @@ function validateCatalog(value: unknown): Catalog {
     throw new ApiFailure('服务返回的目录扫描时间格式无效。', 200, 'INVALID_RESPONSE');
   }
   return value as unknown as Catalog;
+}
+
+function validateRuntimeReport(value: unknown): RuntimeReport {
+  if (!isRecord(value) || typeof value.assessedAt !== 'string' || !Array.isArray(value.observations)
+    || !value.observations.every((entry) => isRecord(entry)
+      && typeof entry.bindingId === 'string' && typeof entry.instanceId === 'string'
+      && ['skill', 'plugin', 'mcp'].includes(String(entry.kind))
+      && (entry.configurationEnabled === null || typeof entry.configurationEnabled === 'boolean')
+      && typeof entry.indexUpdatedAt === 'string'
+      && ['not-checked', 'not-applicable'].includes(String(entry.sessionLoad))
+      && ['not-checked', 'not-applicable'].includes(String(entry.mcpConnection))
+      && entry.clientSessionId === null && entry.evidenceSource === null && entry.observedAt === null
+      && typeof entry.reason === 'string')) {
+    throw new ApiFailure('服务返回的运行证据报告格式无效。', 200, 'INVALID_RESPONSE');
+  }
+  return value as unknown as RuntimeReport;
 }
 
 function validatePlan(value: unknown): ChangePlan {
@@ -230,6 +247,10 @@ export const api = {
 
   async catalog(): Promise<Catalog> {
     return validateCatalog(await request<unknown>(`${API}/catalog`));
+  },
+
+  async runtime(): Promise<RuntimeReport> {
+    return validateRuntimeReport(await request<unknown>(`${API}/runtime`));
   },
 
   async adapters(): Promise<AdapterInfo[]> {
