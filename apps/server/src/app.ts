@@ -24,7 +24,7 @@ function verifiedBasicCodex(instance: { versionEvidence?: import('@agentdeck/con
 }
 type ApplyResult = { plan: ChangePlan; operation: Operation; journalPath?: string; snapshotPath?: string };
 export interface ChangeEngine {
-  prepareToggle(input: { configPath: string; serverName: string; enabled: boolean; now?: Date; ttlMs?: number; target?: defaultChangeEngine.CodexToggleTarget }): Promise<PreparedChange> | PreparedChange;
+  prepareToggle(input: { configPath: string; serverName: string; enabled: boolean; now?: Date; ttlMs?: number; target?: defaultChangeEngine.ConfigToggleTarget }): Promise<PreparedChange> | PreparedChange;
   applyPrepared(prepared: PreparedChange, options: { dataDir: string; now?: Date }): Promise<ApplyResult> | ApplyResult;
   prepareRestore(input: { operationId: string; dataDir: string; now?: Date; ttlMs?: number }): Promise<PreparedChange> | PreparedChange;
   recoverIncomplete?(input: { dataDir: string }): Promise<RecoveryReport> | RecoveryReport;
@@ -177,7 +177,6 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
   app.get(`${API}/adapters`, async () => manager.adapterInfos());
   app.get(`${API}/compatibility`, async () => manager.compatibilityReport());
   app.get(`${API}/catalog`, async () => manager.catalog());
-  app.get(`${API}/runtime`, async () => manager.runtimeReport());
   app.post(`${API}/instances`, async (request, reply) => {
     const input = RegisterInstanceSchema.safeParse(request.body);
     if (!input.success) throw new ManagerError(400, 'INVALID_REQUEST', input.error.issues[0]?.message ?? '实例登记请求无效。');
@@ -213,6 +212,7 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
       } } : {}),
       ...(input.data.instanceId === undefined ? {} : { instanceId: input.data.instanceId }),
       ...(input.data.projectId === undefined ? {} : { projectId: input.data.projectId }),
+      scanRegisteredProjects: input.data.scanRegisteredProjects,
     });
     app.agentdeckEvents.publish({ type: 'catalog.changed', payload: { kind: 'scan', lastScanAt: catalog.lastScanAt } });
     return catalog;
@@ -239,6 +239,29 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
     let binding = store.getBinding(input.data.bindingId);
     if (!binding) throw new ManagerError(404, 'BINDING_NOT_FOUND', '所选资源绑定已不存在。');
     let instance = store.getInstance(binding.instanceId);
+    if (instance && ['zcode', 'claude-code', 'deepseek-harness'].includes(instance.agentId)) {
+      await manager.scan({ instanceId: instance.id });
+      binding = store.getBinding(input.data.bindingId);
+      instance = store.getInstance(instance.id)!;
+      if (!binding) throw new ManagerError(404, 'BINDING_NOT_FOUND', '所选资源已不存在。');
+      const address = binding.toggleTarget;
+      if (!address || address.agentId !== instance.agentId || !binding.writable || !instance.writable || instance.discovery === 'demo') {
+        throw new ManagerError(403, 'POLICY_LOCKED', binding.readOnlyReason ?? '此资源尚未开放启停。');
+      }
+      const configPath = address.agentId === 'deepseek-harness' ? address.configPath
+        : path.join(instance.configRoot, address.agentId === 'zcode' ? 'cli/config.json' : 'settings.json');
+      if (!isWithin(configPath, instance.configRoot)) throw new ManagerError(403, 'PATH_OUTSIDE_SCOPE', '开关文件超出已登记配置根。');
+      const target: defaultChangeEngine.ConfigToggleTarget = address.agentId === 'deepseek-harness'
+        ? { kind: 'dsh-yaml', id: address.id, name: address.name }
+        : { kind: 'json', path: address.path, defaultEnabled: address.defaultEnabled };
+      let prepared: PreparedChange;
+      try { prepared = await engine.prepareToggle({ configPath, serverName: binding.name, enabled: input.data.enabled, target, ...(options.now ? { now: options.now() } : {}) }); }
+      catch (error) { const mapped = sanitizedEngineError(error); throw new ManagerError(mapped.status, mapped.code, mapped.message); }
+      const plan: ChangePlan = { ...prepared.plan, instanceId: instance.id, bindingId: binding.id, status: 'ready' };
+      store.putPlan({ dto: plan, privateData: prepared });
+      reply.code(201);
+      return plan;
+    }
     if (!instance || instance.agentId !== 'codex') throw new ManagerError(403, 'UNSUPPORTED_OPERATION', '只有受支持的 Codex 资源可以修改。');
     if (binding.kind !== 'mcp') {
       await manager.compatibilityReport();
@@ -255,8 +278,8 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
     }
     if (!independentMcp && !verifiedBasicCodex(instance)) throw new ManagerError(403, 'POLICY_LOCKED', '该控制要求已检查的 Codex CLI 0.159.2 / Windows。');
     const isolatedDemo = instance.discovery === 'demo' && isWithin(binding.sourcePath, manager.demoDir);
-    if (!isolatedDemo && (instance.discovery !== 'manual' || !instance.writable || !binding.writable)) {
-      throw new ManagerError(403, 'POLICY_LOCKED', binding.readOnlyReason ?? '写入需要显式登记为可写的 Codex 实例。');
+    if (!isolatedDemo && (instance.discovery === 'demo' || !instance.writable || !binding.writable)) {
+      throw new ManagerError(403, 'POLICY_LOCKED', binding.readOnlyReason ?? '此实例或资源没有可用的启停权限。');
     }
     const configPath = independentMcp ? binding.sourcePath : path.join(instance.configRoot, 'config.toml');
     if (!isWithin(binding.sourcePath, instance.configRoot) || !isWithin(configPath, instance.configRoot)) throw new ManagerError(403, 'PATH_OUTSIDE_SCOPE', '绑定文件在已登记的 Codex 配置根之外。');
@@ -290,12 +313,30 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
       throw new ManagerError(410, 'PLAN_EXPIRED', '变更计划已过期；请基于当前配置重新创建计划。');
     }
     const controlledTarget = (stored.privateData as defaultChangeEngine.PreparedChange).private?.target;
-    if (controlledTarget) {
+    if (controlledTarget?.kind === 'json' || controlledTarget?.kind === 'dsh-yaml') {
+      await manager.scan({ instanceId: stored.dto.instanceId });
+      const currentInstance = store.getInstance(stored.dto.instanceId);
+      const currentBinding = store.getBinding(stored.dto.bindingId);
+      const address = currentBinding?.toggleTarget;
+      const validTarget = currentInstance && address && address.agentId === currentInstance.agentId
+        && isWithin(stored.dto.targetPath, currentInstance.configRoot)
+        && (address.agentId === 'deepseek-harness' ? controlledTarget.kind === 'dsh-yaml'
+          && path.resolve(stored.dto.targetPath) === path.resolve(address.configPath)
+          && address.id === controlledTarget.id && address.name === controlledTarget.name
+          : controlledTarget.kind === 'json'
+            && path.resolve(stored.dto.targetPath) === path.resolve(currentInstance.configRoot, address.agentId === 'zcode' ? 'cli/config.json' : 'settings.json')
+            && JSON.stringify(address.path) === JSON.stringify(controlledTarget.path)
+            && address.defaultEnabled === controlledTarget.defaultEnabled);
+      if (!currentInstance || currentInstance.discovery === 'demo' || !currentInstance.writable || !currentBinding?.writable || !validTarget) {
+        throw new ManagerError(403, 'POLICY_LOCKED', '资源的启停许可或开关位置已变化，请重新操作。');
+      }
+    }
+    if (controlledTarget && controlledTarget.kind !== 'json' && controlledTarget.kind !== 'dsh-yaml') {
       await manager.compatibilityReport();
       await manager.scan({ instanceId: stored.dto.instanceId });
       const currentInstance = store.getInstance(stored.dto.instanceId);
       const currentBinding = store.getBinding(stored.dto.bindingId);
-      if (!currentInstance || !verifiedBasicCodex(currentInstance) || currentInstance.discovery !== 'manual' || !currentInstance.writable || !currentBinding?.writable
+      if (!currentInstance || !verifiedBasicCodex(currentInstance) || currentInstance.discovery === 'demo' || !currentInstance.writable || !currentBinding?.writable
         || path.resolve(stored.dto.targetPath) !== path.resolve(currentInstance.configRoot, 'config.toml')
         || (controlledTarget.kind === 'skill' ? currentBinding.controlScope !== 'user-config-skill' || controlledTarget.path !== path.join(currentBinding.sourcePath, 'SKILL.md')
           : currentBinding.controlScope !== 'local-marketplace-plugin' || currentBinding.pluginId !== controlledTarget.id)) {
