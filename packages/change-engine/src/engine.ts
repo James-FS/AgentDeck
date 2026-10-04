@@ -6,6 +6,8 @@ import { constants as fsConstants } from 'node:fs';
 import path from 'node:path';
 import type { ChangePlan, Operation } from '@agentdeck/contracts';
 import { editCodexEnabled } from './toml-edit.js';
+import { editJsonEnabled } from './json-edit.js';
+import { editDshEnabled } from './yaml-edit.js';
 import {
   type AppliedChange,
   ChangeEngineError,
@@ -13,7 +15,7 @@ import {
   type PathIdentity,
   type PathIdentityEntry,
   type PreparedChange,
-  type CodexToggleTarget,
+  type ConfigToggleTarget,
   type PrepareToggleInput,
   type RecoveryItem,
   type RecoveryReport,
@@ -29,7 +31,7 @@ interface AppliedRecord {
   plan: ChangePlan;
   configPath: string;
   serverName: string;
-  target?: CodexToggleTarget;
+  target?: ConfigToggleTarget;
   beforeHash: string;
   afterHash: string;
   snapshotPath: string | null;
@@ -47,7 +49,7 @@ interface JournalRecord {
   operation: Operation;
   configPath: string;
   serverName: string;
-  target?: CodexToggleTarget;
+  target?: ConfigToggleTarget;
   beforeHash: string;
   afterHash: string;
   snapshotPath: string | null;
@@ -73,7 +75,9 @@ function safeNow(input?: Date): Date { return input ? new Date(input.getTime()) 
 
 function stateLabel(value: boolean | null): string { return value === null ? 'unknown' : value ? 'true' : 'false'; }
 
-function targetLabel(serverName: string, target?: CodexToggleTarget): string {
+function targetLabel(serverName: string, target?: ConfigToggleTarget): string {
+  if (target?.kind === 'dsh-yaml') return `DSH plugin ${target.name} / ${target.id} (disabled = !enabled)`;
+  if (target?.kind === 'json') return target.path.map(key => JSON.stringify(key)).join('.');
   if (target?.kind === 'plugin') return `[plugins.${JSON.stringify(target.id)}]`;
   if (target?.kind === 'skill') return `[[skills.config]]\npath = ${JSON.stringify(target.path)}`;
   return `[mcp_servers.${JSON.stringify(serverName)}]`;
@@ -357,7 +361,9 @@ export async function prepareToggle(input: PrepareToggleInput): Promise<Prepared
   const configPath = path.resolve(input.configPath);
   const originalBytes = await readConfig(configPath);
   const original = decodeUtf8(originalBytes);
-  const edited = editCodexEnabled(original, input.serverName, input.enabled, input.target);
+  const edited = input.target?.kind === 'json' ? editJsonEnabled(original, input.enabled, input.target)
+    : input.target?.kind === 'dsh-yaml' ? editDshEnabled(original, input.enabled, input.target)
+      : editCodexEnabled(original, input.serverName, input.enabled, input.target);
   const updatedBytes = Buffer.from(edited.text, 'utf8');
   const afterHash = sha256(updatedBytes);
   const beforeHash = sha256(originalBytes);
@@ -464,7 +470,9 @@ export async function prepareRestore(input: { operationId: string; dataDir: stri
     fail('RECOVERY_CONFLICT', '该操作没有已验证的恢复快照。');
   }
   const snapshot = await readSnapshot(root, record.snapshotPath, record.beforeHash);
-  const previousDocument = editCodexEnabled(decodeUtf8(snapshot), record.serverName, record.desiredEnabled ?? true, record.target);
+  const previousDocument = record.target?.kind === 'json' ? editJsonEnabled(decodeUtf8(snapshot), record.desiredEnabled ?? true, record.target)
+    : record.target?.kind === 'dsh-yaml' ? editDshEnabled(decodeUtf8(snapshot), record.desiredEnabled ?? true, record.target)
+      : editCodexEnabled(decodeUtf8(snapshot), record.serverName, record.desiredEnabled ?? true, record.target);
   const currentIdentity = await capturePathIdentity(record.configPath);
   if (!sameIdentity(record.appliedIdentity, currentIdentity)) fail('PATH_CHANGED', '操作之后目标路径身份发生变化。');
   const current = await readConfig(record.configPath);

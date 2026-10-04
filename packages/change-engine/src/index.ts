@@ -10,8 +10,13 @@ export type {
   PreparedChangePrivate,
   PrepareToggleInput,
   CodexToggleTarget,
+  ConfigToggleTarget,
+  JsonToggleTarget,
+  DshToggleTarget,
   RecoveryItem,
   RecoveryReport,
 } from './types.js';
 export { serializePreparedChange, deserializePreparedChange } from './serialization.js';
 export { editCodexEnabled } from './toml-edit.js';
+export { editJsonEnabled } from './json-edit.js';
+export { editDshEnabled } from './yaml-edit.js';

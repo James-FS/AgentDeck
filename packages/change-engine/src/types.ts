@@ -40,10 +40,13 @@ export interface PreparedChangePrivate {
   pathIdentity: PathIdentity;
   beforeEnabled: boolean | null;
   desiredEnabled: boolean | null;
-  target?: CodexToggleTarget;
+  target?: ConfigToggleTarget;
 }
 
 export type CodexToggleTarget = { kind: 'skill'; path: string } | { kind: 'plugin'; id: string };
+export type JsonToggleTarget = { kind: 'json'; path: string[]; defaultEnabled: boolean };
+export type DshToggleTarget = { kind: 'dsh-yaml'; id: string; name: string };
+export type ConfigToggleTarget = CodexToggleTarget | JsonToggleTarget | DshToggleTarget;
 
 export interface PreparedChange {
   plan: ChangePlan;
@@ -75,7 +78,7 @@ export interface PrepareToggleInput {
   enabled: boolean;
   now?: Date;
   ttlMs?: number;
-  target?: CodexToggleTarget;
+  target?: ConfigToggleTarget;
 }
 
 export interface EngineOptions { dataDir: string; now?: Date }
