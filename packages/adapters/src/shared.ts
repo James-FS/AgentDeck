@@ -189,11 +189,42 @@ export function baseBinding(args: {
   configurationEnabled?: boolean | null;
   cacheState?: Binding['cacheState'];
   mcpTransport?: Binding['mcpTransport'];
+  location?: NonNullable<Binding['classification']>['location'];
+  pluginIdentityVerified?: boolean;
 }): Binding {
   const sourcePath = normalizePath(args.sourcePath);
   const projectId = args.projectId === undefined ? (args.context.project?.id ?? null) : args.projectId;
   const id = stableId('binding', args.context.instance.id, projectId ?? 'user', args.kind, args.scope, args.identityPath ?? sourcePath, args.nativeKey);
+  const configured = Boolean(args.configurationSourcePath || args.origin === 'configuration');
+  const knownProject = projectId !== null && projectId === args.context.project?.id;
+  const inventoryScope = knownProject ? 'project' : projectId !== null ? 'unknown'
+    : args.scope === 'user-global' || configured ? 'user-global' : 'unknown';
   return {
+    classification: {
+      category: args.location?.category ?? (knownProject ? 'agent-project'
+        : isWithin(args.context.instance.configRoot, sourcePath) || configured ? 'agent-global' : 'unknown'),
+      scope: inventoryScope,
+      agentId: args.location?.category === 'user-global' || args.location?.category === 'project' ? null : args.context.instance.agentId || null,
+      discoveredByAgentId: args.context.instance.agentId,
+      relationship: configured ? 'configured' : 'discovered',
+      projectName: knownProject ? args.context.project!.name : null,
+      projectRoot: knownProject ? args.context.project!.rootPath : null,
+      evidencePath: normalizePath(args.configurationSourcePath ?? args.sourcePath),
+      reason: knownProject ? '适配器在明确登记项目中发现配置或资源；目录分组不证明子目录生效范围。'
+        : inventoryScope === 'user-global' ? '适配器识别的用户配置层或用户 Skill 根；不限定项目，不证明其他 Agent 使用。'
+          : '仅发现原生目录或缓存内容，未关联可确定作用范围的配置。',
+      contentCompatibility: 'unknown',
+      location: args.location ?? {
+        category: knownProject ? 'agent-project'
+          : isWithin(args.context.instance.configRoot, sourcePath) || configured ? 'agent-global' : 'unknown',
+        rootPath: knownProject ? args.context.project!.rootPath
+          : isWithin(args.context.instance.configRoot, sourcePath) || configured ? normalizePath(args.context.instance.configRoot) : null,
+        evidencePath: sourcePath,
+        reason: knownProject ? '资源或配置位于明确登记项目中此 Agent 的扫描入口；不声明内容专用。'
+          : isWithin(args.context.instance.configRoot, sourcePath) ? '来源位于此 Agent 已登记配置根内；证明全局存放归属，不证明安装、启用或使用范围。'
+            : configured ? '此 Agent 适配器识别的用户配置记录；不限定项目。' : '没有可确定的资源存放范围证据。',
+      },
+    },
     id,
     resourceId: stableId('resource', args.kind, args.identityPath ?? sourcePath, args.nativeKey),
     instanceId: args.context.instance.id,
@@ -206,7 +237,7 @@ export function baseBinding(args: {
     ...(args.discoveryPath === undefined ? {} : { discoveryPath: args.discoveryPath }),
     scope: args.scope,
     sourceKind: args.sourceKind,
-    compatibilityClass: args.kind === 'skill' ? 'unknown' : 'agent-specific',
+    compatibilityClass: 'unknown',
     parentId: args.parentId ?? null,
     sourcePath,
     nativeKey: args.nativeKey,
@@ -219,6 +250,7 @@ export function baseBinding(args: {
     ...(args.origin === undefined ? {} : { origin: args.origin }),
     ...(args.pluginId === undefined ? {} : { pluginId: args.pluginId }),
     ...(args.pluginVersion === undefined ? {} : { pluginVersion: args.pluginVersion }),
+    ...(args.pluginIdentityVerified === undefined ? {} : { pluginIdentityVerified: args.pluginIdentityVerified }),
     ...(args.marketplace === undefined ? {} : { marketplace: args.marketplace }),
     ...(args.configurationSourcePath === undefined ? {} : { configurationSourcePath: normalizePath(args.configurationSourcePath) }),
     ...(args.configurationKey === undefined ? {} : { configurationKey: args.configurationKey }),
@@ -228,8 +260,109 @@ export function baseBinding(args: {
   };
 }
 
-export function report(bindings: Binding[], diagnostics: string[]): ScanReport {
+export function isPublicGlobalResource(binding: Binding): boolean {
+  const c = binding.classification;
+  return binding.parentId === null && binding.projectId === null && c?.agentId === null && c.category === 'user-global'
+    && c.location?.category === 'user-global' && /\/\.agents(?:\/|$)/i.test(c.location.rootPath?.replaceAll('\\', '/') ?? '');
+}
+export async function report(bindings: Binding[], diagnostics: string[]): Promise<ScanReport> {
+  attachProjectPluginComponents(bindings, diagnostics);
+  const byId = new Map(bindings.map(binding => [binding.id, binding]));
+  for (const binding of bindings) {
+    if (binding.kind === 'skill' && !binding.configurationControl) {
+      binding.configurationControl = binding.discoveryOnly
+        ? { mode: 'unknown', reason: '仅磁盘发现，客户端是否识别该 Skill 和开关机制均未确定。' }
+        : binding.parentId && byId.get(binding.parentId)?.kind === 'plugin'
+          ? { mode: 'parent', reason: '插件组件，状态来自关联父插件配置；不提供独立 Skill 开关，不证明实际加载。' }
+          : !binding.parentId && binding.configurationSourcePath && binding.configurationKey && typeof binding.enabled === 'boolean'
+            ? { mode: 'independent', reason: '识别到此 Skill 的配置覆盖或已验证的默认开关规则；不证明实际调用。' }
+            : { mode: 'unknown', reason: '尚无独立开关或无开关机制的可靠证据；未找到配置不等于没有开关。' };
+    }
+    const classification = binding.classification;
+    if (!classification) continue;
+    if (binding.configurationSourcePath && !binding.discoveryOnly) {
+      classification.relationship = 'configured';
+    }
+    if (binding.parentId) {
+      const parent = byId.get(binding.parentId)?.classification;
+      if (parent) {
+        classification.scope = parent.scope;
+        classification.projectName = parent.projectName;
+        classification.projectRoot = parent.projectRoot;
+        classification.relationship = parent.relationship;
+        if (parent.category) classification.category = parent.category;
+        else delete classification.category;
+        if (parent.installationEvidence) classification.installationEvidence = { ...parent.installationEvidence };
+        else delete classification.installationEvidence;
+        classification.evidencePath = parent.evidencePath;
+        classification.reason = `继承父插件绑定的范围与归属：${parent.reason}`;
+      }
+    }
+    const physicalPath = await realpath(binding.sourcePath).catch(() => null);
+    if (physicalPath) classification.sourceIdentity = stableId('source', binding.kind,
+      process.platform === 'win32' ? physicalPath.toLowerCase() : physicalPath,
+      binding.kind === 'skill' ? '' : binding.parentId ? binding.nativeKey : binding.configurationKey ?? binding.nativeKey);
+  }
+  // User-selected inventory policy: owned Agent directories count as readable.
+  // Preserve explicit native flags, invalid/conflicting overrides and public-source uncertainty.
+  for (const binding of bindings) {
+    const parent = binding.parentId ? byId.get(binding.parentId) : undefined;
+    const owned = binding.classification?.agentId && ['agent-global', 'agent-project'].includes(binding.classification?.location?.category ?? '');
+    const unresolvedOverride = binding.configurationKey && binding.configurationEnabled === null && !binding.configurationControl?.visibility;
+    const invalidEvidence = binding.pluginIdentityVerified === false || binding.diagnostics.some(note => /不是静态|非静态|无效|冲突|invalid|malformed/i.test(note)) || Boolean(binding.configurationStateReason);
+    const cacheOnly = (binding.origin === 'cache' || parent?.origin === 'cache') && !binding.configurationKey;
+    if (isPublicGlobalResource(binding)) {
+      binding.enabled = binding.enabled === false ? false : true;
+      binding.configurationStateReason = binding.enabled === false
+        ? `此 Agent 配置明确禁用该公共资源，仅影响此绑定；${binding.configurationControl?.reason ?? '保留原生配置来源与键。'}`
+        : '按用户指定的公共资源展示规则：用户 .agents 来源默认已启用，此 Agent 未识别到明确禁用配置；这是一项盘点约定，不是运行探测。';
+    } else if (parent?.enabled === false) {
+      binding.enabled = false;
+      binding.configurationStateReason = '关联父插件配置明确禁用。';
+    } else if (binding.enabled === null && owned && !cacheOnly && !unresolvedOverride && !invalidEvidence && !(binding.parentId && !parent)) {
+      binding.enabled = true;
+      binding.configurationStateReason = '按资源盘点默认规则：位于此 Agent 的已登记资源目录，视为可读取；没有明确禁用记录，默认已启用。该规则不证明会话加载或调用。';
+    } else {
+      binding.configurationStateReason = binding.configurationStateReason ?? (binding.enabled === null ? cacheOnly ? '仅发现插件缓存，未关联启用配置；缓存及附带组件存在不证明插件启用，状态未确定。' : '没有可确定的读取归属或配置状态，或配置值无效/冲突，状态未确定。'
+        : binding.configurationControl?.reason ?? '来自适配器识别的原生配置开关；不证明会话加载、连接或调用。');
+    }
+  }
   return { bindings: [...new Map(bindings.map(binding => [binding.id, binding])).values()], diagnostics: [...new Set(diagnostics)] };
+}
+
+/** A project references an exact plugin identity; preserve a separate binding for each cached component/version. */
+function attachProjectPluginComponents(bindings: Binding[], diagnostics: string[]): void {
+  const original = [...bindings];
+  let added = 0;
+  for (const projectParent of original.filter(b => b.kind === 'plugin' && b.projectId && b.pluginId && b.origin === 'configuration')) {
+    const caches = original.filter(b => b.kind === 'plugin' && b.projectId === null && b.pluginId === projectParent.pluginId
+      && b.instanceId === projectParent.instanceId && b.origin === 'cache' && b.pluginIdentityVerified === true
+      && (!projectParent.pluginVersion || projectParent.pluginVersion === b.pluginVersion));
+    for (const cache of caches) {
+      for (const child of original.filter(b => b.parentId === cache.id)) {
+        if (++added > MAX_SCAN_ENTRIES) { diagnostics.push('项目插件组件关联达到有界条目上限。'); return; }
+        const classification = projectParent.classification;
+        if (!classification) continue;
+        const component: Binding = { ...child,
+          id: stableId('binding', projectParent.id, child.id), parentId: projectParent.id, projectId: projectParent.projectId,
+          scope: projectParent.scope,
+          classification: { ...classification, ...(child.classification?.location ? { location: { ...child.classification.location } } : {}) },
+          enabled: projectParent.enabled === false ? false : null, runtime: 'unknown', writable: false,
+          readOnlyReason: '项目配置引用的插件缓存组件只读；不确认实际加载版本或子项生效状态。',
+          diagnostics: [...child.diagnostics.filter(note => !note.includes('父插件')),
+            '项目配置精确引用插件身份；保留每个缓存版本，未确认客户端实际使用的版本。'],
+        };
+        delete component.controlScope;
+        delete component.configurationSourcePath;
+        delete component.configurationKey;
+        delete component.configurationEnabled;
+        if (projectParent.configurationSourcePath) component.configurationSourcePath = projectParent.configurationSourcePath;
+        if (projectParent.configurationKey) component.configurationKey = projectParent.configurationKey;
+        if (projectParent.configurationEnabled !== undefined) component.configurationEnabled = projectParent.configurationEnabled;
+        bindings.push(component);
+      }
+    }
+  }
 }
 
 export function instance(args: {
@@ -332,6 +465,7 @@ export async function scanSkillRoot(args: {
   configurationKey?: string;
   configurationEnabled?: boolean | null;
   cacheState?: Binding['cacheState'];
+  location?: NonNullable<Binding['classification']>['location'];
 }): Promise<Binding[]> {
   const bindings: Binding[] = [];
   if (!(await existsDirectory(args.root))) return bindings;
@@ -361,6 +495,7 @@ export async function scanSkillRoot(args: {
         name,
         scope: args.scope,
         sourceKind: args.sourceKind,
+        ...(args.location ? { location: args.location } : {}),
         sourcePath: info,
         nativeKey: path.resolve(info),
         identityPath: await canonicalPath(info),

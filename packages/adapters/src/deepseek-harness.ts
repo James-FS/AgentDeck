@@ -1,67 +1,14 @@
 import { createHash } from 'node:crypto';
 import type { AgentAdapter, Binding, ScanContext, ScanReport } from '@agentdeck/contracts';
-import { isAlias, isMap, isPair, isScalar, isSeq, parseDocument } from 'yaml';
+import { isSeq, parseDocument } from 'yaml';
 import path from 'node:path';
 import {
   baseBinding, boundedText, directDirectories, directEntries, expandPath, existsDirectory,
   existsRegularFile, findExecutable, instance, isSafePathWithin, report, scanSkillRoot,
 } from './shared.js';
-
-interface YNode {
-  items?: unknown[];
-  value?: unknown;
-  tag?: string;
-  source?: string;
-}
-
-const DYNAMIC_MARKER = Object.freeze({ agentDeckDynamicExpression: true });
-const CUSTOM_TAGS = [{
-  tag: 'tag:yaml.org,2002:js',
-  resolve: () => DYNAMIC_MARKER,
-}];
-
-function scalar(node: unknown): unknown {
-  if (!isScalar(node)) return undefined;
-  const value = node as YNode;
-  if (value.tag === 'tag:yaml.org,2002:js') return undefined;
-  return value.value;
-}
-
-function isDynamic(node: unknown): boolean {
-  if (!node || typeof node !== 'object' || isAlias(node)) return true;
-  const value = node as YNode;
-  if (value.tag === 'tag:yaml.org,2002:js') return true;
-  if (value.source !== undefined && value.value === undefined && !Array.isArray(value.items)) return true;
-  const raw = scalar(node);
-  return raw !== null && typeof raw === 'object';
-}
-
-function mapValue(node: unknown, key: string): unknown {
-  if (!isMap(node)) return undefined;
-  const items = (node as YNode).items;
-  if (!Array.isArray(items)) return undefined;
-  for (const item of items) {
-    if (!isPair(item)) continue;
-    const pair = item as { key?: unknown; value?: unknown };
-    if (scalar(pair.key) === key) return pair.value;
-  }
-  return undefined;
-}
-
-function rowSequence(root: unknown): unknown[] {
-  if (isSeq(root)) return (root as YNode).items ?? [];
-  return [];
-}
-
-function staticString(node: unknown): string | null {
-  const value = scalar(node);
-  return typeof value === 'string' && !isDynamic(node) ? value : null;
-}
-
-function staticBoolean(node: unknown): boolean | null {
-  const value = scalar(node);
-  return typeof value === 'boolean' && !isDynamic(node) ? value : null;
-}
+import { CUSTOM_TAGS, mapValue, rowSequence, staticBoolean, staticString, type YNode } from './dsh-patch.js';
+import { scanDshBuiltins } from './dsh-builtin.js';
+import { markDshToggleTarget } from './dsh-toggle.js';
 
 function stableRowKey(sourcePath: string, rawId: string | null, rowIndex: number, rawSource: string): string {
   if (rawId) return rawId;
@@ -116,6 +63,7 @@ async function scanProfilePatch(context: ScanContext, file: string, boundary: st
       readOnlyReason: '在验证官方 manager 语义前，DSH profile patch 条目保持只读。',
     });
     bindings.push(parent);
+    await markDshToggleTarget(context, parent, sourceText, rawId, packageName);
 
     if (packageName !== '@deepseek-ai/dsh-mcp-client') continue;
     const config = mapValue(row, 'config');
@@ -128,6 +76,8 @@ async function scanProfilePatch(context: ScanContext, file: string, boundary: st
       context, kind: 'mcp', name: serverName, scope, sourceKind, projectId,
       sourcePath: file, nativeKey: `profiles.${profile}.plugins.${id}.config.serverName`, parentId: parent.id,
       enabled: state,
+      mcpTransport: ['stdio'].includes(staticString(mapValue(config, 'transport')) ?? '') ? 'stdio'
+        : ['http', 'sse', 'streamable-http'].includes(staticString(mapValue(config, 'transport')) ?? '') ? 'http' : 'unknown',
       origin: 'configuration', configurationSourcePath: file,
       configurationKey: `profiles.${profile}.plugins.${id}.config.serverName`, configurationEnabled: state,
       cacheState: 'unknown',
@@ -147,7 +97,9 @@ async function scanProfiles(context: ScanContext, boundary: string, root: string
   for (const directory of await directDirectories(root)) {
     if (!(await isSafePathWithin(boundary, directory))) continue;
     const profile = path.basename(directory);
-    const files = (await directEntries(directory)).filter((file) => /\.(?:patch\.)?ya?ml$/i.test(file));
+    // Profile roots also contain pnpm lock/workspace files; those are not plugin declarations.
+    const files = (await directEntries(directory)).filter((file) => /\.(?:patch\.)?ya?ml$/i.test(file)
+      && !/^(?:pnpm-lock|pnpm-workspace)\.ya?ml$/i.test(path.basename(file)));
     for (const file of files.slice(0, 40)) {
       if (!(await existsRegularFile(file)) || !(await isSafePathWithin(boundary, file))) continue;
       bindings.push(...await scanProfilePatch(context, file, boundary, profile, projectScope, diagnostics));
@@ -183,6 +135,10 @@ export const deepSeekHarnessAdapter: AgentAdapter = {
     } else if (await existsDirectory(globalSkillsRoot)) {
       diagnostics.push('DSH 用户 Skills 根目录跨越符号链接或 junction，已跳过。');
     }
+    for (const filename of ['cordis.patch.yml', 'cordis.patch.yaml']) {
+      const file = path.join(root, filename);
+      if (await existsRegularFile(file) && await isSafePathWithin(root, file)) bindings.push(...await scanProfilePatch(context, file, root, 'user', false, diagnostics));
+    }
     bindings.push(...await scanProfiles(context, root, path.join(root, 'profiles'), false, diagnostics));
     if (context.project) {
       const projectSkillsRoot = path.join(context.project.rootPath, '.dsh', 'skills');
@@ -197,6 +153,7 @@ export const deepSeekHarnessAdapter: AgentAdapter = {
       const projectDshRoot = path.join(context.project.rootPath, '.dsh');
       bindings.push(...await scanProfiles(context, context.project.rootPath, path.join(projectDshRoot, 'profiles'), true, diagnostics));
     }
+    await scanDshBuiltins(context, bindings, diagnostics);
     return report(bindings, diagnostics);
   },
 };

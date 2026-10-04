@@ -2,6 +2,7 @@ import TOML from '@iarna/toml';
 import { editCodexEnabled, type CodexToggleTarget } from '@agentdeck/change-engine';
 import type { AgentAdapter, AgentInstance, Binding, ScanContext, ScanReport } from '@agentdeck/contracts';
 import path from 'node:path';
+import { readCodexSkillOverrides } from './codex-skill-state.js';
 import {
   baseBinding, declaredPath, directDirectories, expandPath, existsDirectory, existsRegularFile, findExecutable,
   instance, isSafePathWithin, isWithin, mcpTransport, object, report, safeMcpFile, safeTomlFile, scanSingleSkill, scanSkillRoot,
@@ -11,7 +12,7 @@ const discoveredHomes = new Map<string, string>();
 
 function enabledValue(value: unknown): boolean | null {
   const obj = object(value);
-  return typeof obj?.enabled === 'boolean' ? obj.enabled : null;
+  return obj && !Object.hasOwn(obj, 'enabled') ? true : typeof obj?.enabled === 'boolean' ? obj.enabled : null;
 }
 
 function pluginChildState(parentEnabled: boolean | null, rawServer: unknown): { enabled: boolean | null; diagnostics: string[] } {
@@ -152,6 +153,7 @@ async function scanCodexPluginCache(args: {
           sourcePath: manifestPath, projectId: null, nativeKey: `cache:${marketplace}/${directoryName}/${version}`,
           identityPath: versionDir, enabled: config?.enabled ?? null,
           origin: 'cache', pluginId: identity, pluginVersion: version, marketplace,
+          pluginIdentityVerified: manifestName === directoryName,
           ...(config ? { configurationSourcePath: config.sourcePath, configurationKey: config.key, configurationEnabled: config.enabled } : { configurationEnabled: null }),
           cacheState: 'present',
           diagnostics: [
@@ -160,6 +162,17 @@ async function scanCodexPluginCache(args: {
           ],
           readOnlyReason: '缓存插件版本只读；无法从缓存内容推断当前运行版本。',
         });
+        const installRecordPath = path.join(pluginDir, '.codex-remote-plugin-install.json');
+        if (!nameMismatch && await isSafePathWithin(configRoot, installRecordPath) && await existsRegularFile(installRecordPath)) {
+          const install = object(await safeMcpFile<unknown>(installRecordPath, args.diagnostics, 'Codex remote plugin install record'));
+          if (install?.schema_version === 1 && typeof install.remote_plugin_id === 'string'
+            && /^[A-Za-z0-9_-]{1,160}$/.test(install.remote_plugin_id) && parent.classification) {
+            parent.classification.installationEvidence = {
+              path: installRecordPath, scope: 'unknown',
+              reason: '包目录有 schema_version=1 的远程安装记录；没有 scope 或选用版本字段，不能确认使用范围、当前缓存版本或启用状态。',
+            };
+          } else args.diagnostics.push('Codex 远程安装记录结构不受支持，未作为安装范围证据。');
+        }
         args.bindings.push(parent);
         if (!nameMismatch) represented.add(identity);
 
@@ -246,7 +259,7 @@ export const codexAdapter: AgentAdapter = {
   info: {
     id: 'codex', name: 'Codex', description: '对 Codex 的只读本地发现与有限配置扫描。',
     supportedKinds: ['skill', 'plugin', 'mcp'],
-    writeSupport: ['experimental: manually registered writable instance, independent user MCP', 'Codex 0.159.2/win32: user config-root Skill overrides and configured local marketplace plugin toggles'],
+    writeSupport: ['experimental: default supported independent user MCP switches; explicit read-only respected', 'Codex 0.159.2/win32: user config-root Skill overrides and configured local marketplace plugin toggles'],
   },
   async discover({ homeDir, env }): Promise<AgentInstance[]> {
     const root = expandPath(env.CODEX_HOME || path.join(homeDir, '.codex'), homeDir);
@@ -277,7 +290,7 @@ export const codexAdapter: AgentAdapter = {
     if (config) {
       const standalone = object(config.mcp_servers);
       if (standalone) {
-        const writableInstance = (agent.discovery === 'manual' || agent.discovery === 'demo') && agent.writable;
+        const writableInstance = agent.writable;
         for (const [serverName, raw] of Object.entries(standalone)) {
           const server = object(raw);
           const state = server && server.enabled === undefined ? true : typeof server?.enabled === 'boolean' ? server.enabled : null;
@@ -300,7 +313,7 @@ export const codexAdapter: AgentAdapter = {
             mcpTransport: transport,
             writable,
             readOnlyReason: writable ? null : !writableInstance
-              ? 'Writing requires a manually registered writable instance or an isolated writable demo instance.'
+              ? '此实例已设为只读。'
               : 'TOML 目标表无法唯一定位。',
             diagnostics: reasons,
           }));
@@ -334,6 +347,13 @@ export const codexAdapter: AgentAdapter = {
       if (!(await isSafePathWithin(root.boundary, root.root))) continue;
       bindings.push(...await scanSkillRoot({
         root: root.root, context, scope: root.scope, sourceKind: root.source,
+        ...(root.root === path.join(userHome, '.agents', 'skills') || (project && root.root === path.join(project.rootPath, '.agents', 'skills')) ? {
+          location: {
+            category: root.scope === 'user-global' ? 'user-global' as const : 'project' as const,
+            rootPath: root.root, evidencePath: root.root,
+            reason: '适配器明确扫描的 .agents/skills 用户或项目资源库；不是 Agent 独占目录，也不单独证明多个 Agent 共用。',
+          },
+        } : {}),
         projectId: root.scope === 'user-global' ? null : context.project?.id ?? null,
         origin: 'filesystem', diagnostics,
       }));
@@ -351,6 +371,7 @@ export const codexAdapter: AgentAdapter = {
         });
         const projectConfig = projectParsed.value;
         if (projectConfig) {
+          await readCodexSkillOverrides(bindings, projectConfig, projectConfigPath, project.id);
           const projectServers = object(projectConfig.mcp_servers);
           if (projectServers) {
             for (const [serverName, raw] of Object.entries(projectServers)) {
@@ -394,6 +415,7 @@ export const codexAdapter: AgentAdapter = {
       }) : [];
       bindings.push(...bundledSkills);
     }
+    await readCodexSkillOverrides(bindings, config, configPath, null);
     for (const binding of bindings) {
       if (binding.parentId !== null || binding.projectId !== null) continue;
       let target: CodexToggleTarget | undefined;
@@ -430,11 +452,11 @@ export const codexAdapter: AgentAdapter = {
         structurallySupported = true;
       } catch { binding.enabled = null; binding.configurationEnabled = null; }
       const verifiedVersion = agent.versionEvidence?.signature === 'codex-cli-version' && agent.versionEvidence.version === '0.159.2' && agent.versionEvidence.platform === 'win32';
-      binding.writable = agent.discovery === 'manual' && agent.writable && verifiedVersion && structurallySupported;
+      binding.writable = agent.discovery !== 'demo' && agent.writable && verifiedVersion && structurallySupported;
       binding.readOnlyReason = binding.writable ? null : !structurallySupported
         ? '配置缺失或目标覆盖不能唯一安全定位；不创建文件或改写未知结构。'
         : !verifiedVersion ? '此开关仅验收 Codex CLI 0.159.2 / Windows；请检查版本，其他版本保持只读。'
-        : '需要手动登记并明确允许配置修改；自动发现保持只读。';
+        : '此实例已设为只读。';
       binding.diagnostics.push(target.kind === 'skill'
         ? '仅修改该 Codex 实例的按路径覆盖；Skill 原文保持不变。配置读取状态不代表当前会话已加载，变更后重启 Codex。'
         : '修改插件身份的整体开关，影响该身份全部缓存版本的 Skill/MCP/其他组件；不修改缓存，当前会话运行状态未知。');

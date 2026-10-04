@@ -1,5 +1,6 @@
 import type { AgentAdapter, AgentInstance, Binding, ScanContext, ScanReport } from '@agentdeck/contracts';
 import path from 'node:path';
+import { markClaudeToggleTargets } from './claude-toggle.js';
 import {
   baseBinding, declaredPath, directDirectories, expandPath, existsDirectory, existsRegularFile, findExecutable,
   instance, isSafePathWithin, mcpTransport, object, report, safeMcpFile, scanSingleSkill, scanSkillRoot,
@@ -22,6 +23,7 @@ function addMcpEntries(args: {
   diagnostics: string[];
   label: string;
   configurationKey?: string;
+  projectId?: string;
 }): Binding[] {
   const result: Binding[] = [];
   const servers = object(args.entries);
@@ -30,8 +32,8 @@ function addMcpEntries(args: {
     const server = object(raw);
     const enabled = typeof server?.enabled === 'boolean' ? server.enabled : null;
     result.push(baseBinding({
-      context: args.context, kind: 'mcp', name, scope: args.context.project && args.sourceKind === 'repository' ? 'project' : 'native',
-      sourceKind: args.sourceKind, sourcePath: args.file, projectId: args.sourceKind === 'user' ? null : args.context.project?.id ?? null,
+      context: args.context, kind: 'mcp', name, scope: args.projectId || (args.context.project && args.sourceKind === 'repository') ? 'project' : 'native',
+      sourceKind: args.sourceKind, sourcePath: args.file, projectId: args.projectId ?? (args.sourceKind === 'user' ? null : args.context.project?.id ?? null),
       nativeKey: `mcpServers.${name}`, enabled,
       origin: 'configuration', configurationSourcePath: args.file,
       configurationKey: args.configurationKey ? `${args.configurationKey}.${name}` : `mcpServers.${name}`,
@@ -159,6 +161,7 @@ async function scanClaudePlugins(args: {
             sourcePath: manifestPath, projectId: null, nativeKey: `cache:${marketplace}/${pluginFolder}/${version}`,
             identityPath: versionDir, enabled: configuration?.enabled ?? null,
             origin: 'cache', pluginId, pluginVersion: version, marketplace,
+            pluginIdentityVerified: manifestName === pluginFolder,
             ...(configuration ? {
               configurationSourcePath: configuration.sourcePath,
               configurationKey: configuration.key,
@@ -297,7 +300,23 @@ async function scanClaudePlugins(args: {
         const manifestPresent = Boolean(manifestPath && await isSafePathWithin(root, manifestPath)
           && await existsRegularFile(manifestPath) && !cacheIdentityConflicts.has(packageKey));
         const cacheVersionKey = packageKey;
-        if (recordProjectId === null && version && cacheVersions.has(cacheVersionKey) && pathMatches) continue;
+        if (recordProjectId === null && version && cacheVersions.has(cacheVersionKey) && pathMatches) {
+          const cached = bindings.filter(item => item.pluginId === identity && item.pluginVersion === version);
+          if (scope === 'user' || scope === 'user-global') {
+            for (const item of cached) {
+              if (item.classification) item.classification.installationEvidence = {
+                path: installedFile, scope: 'user-global', reason: '明确 user 安装记录精确匹配插件身份、版本与缓存路径。',
+              };
+              if (item.classification && !item.configurationSourcePath) {
+                item.classification.scope = 'user-global';
+                item.classification.relationship = 'configured';
+                item.classification.evidencePath = installedFile;
+                item.classification.reason = 'installed_plugins.json 的 user 安装记录精确匹配插件身份、版本和缓存路径；不证明当前加载或跨 Agent 兼容。';
+              }
+            }
+          }
+          continue;
+        }
         const configuration = recordProjectId === null ? userConfigs.get(identity) : undefined;
         const registrationKey = `plugins[${JSON.stringify(identity)}][${index}]`;
         const registrationDiagnostics = [
@@ -305,7 +324,7 @@ async function scanClaudePlugins(args: {
           ...(cacheIdentityConflicts.has(packageKey) ? ['插件 manifest 名称与已安装插件身份冲突。'] : []),
           ...(pathMatches && !manifestPresent ? ['Installed plugin registration points to a cache version with no readable plugin manifest.'] : []),
         ];
-        addClaudePluginConfiguration({
+        const registered = addClaudePluginConfiguration({
           context, identity, sourcePath: installedFile, key: registrationKey,
           enabled: configuration?.enabled ?? null,
           projectId: recordProjectId,
@@ -313,6 +332,15 @@ async function scanClaudePlugins(args: {
           cacheState: pathMatches ? cacheIdentityConflicts.has(packageKey) ? 'unknown' : manifestPresent ? 'present' : 'missing' : 'unknown',
           ...(version ? { version } : {}), diagnostics: registrationDiagnostics, bindings,
         });
+        if (scope === undefined && !isProjectRecord && !configuration && registered.classification) {
+          registered.classification.scope = 'unknown';
+          registered.classification.reason = '安装记录没有明确 scope，且没有关联用户配置；作用范围未知。';
+        }
+        if (registered.classification) registered.classification.installationEvidence = {
+          path: installedFile, scope: registered.classification.scope === 'project' ? 'project'
+            : registered.classification.scope === 'user-global' ? 'user-global' : 'unknown',
+          reason: '安装登记记录；缓存是否匹配另行显示，不证明实际加载。',
+        };
       }
     }
   }
@@ -458,6 +486,8 @@ function samePath(left: string, right: string): boolean {
   return process.platform === 'win32' ? a.toLocaleLowerCase('en-US') === b.toLocaleLowerCase('en-US') : a === b;
 }
 
+const discoveredHomes = new Map<string, string>();
+
 export const claudeCodeAdapter: AgentAdapter = {
   id: 'claude-code',
   name: 'Claude Code',
@@ -470,13 +500,15 @@ export const claudeCodeAdapter: AgentAdapter = {
     const executable = await findExecutable(env, ['claude']);
     const hasState = await existsDirectory(root) || await existsRegularFile(path.join(homeDir, '.claude.json'));
     if (!hasState && !executable) return [];
-    return [instance({ agentId: 'claude-code', name: 'Claude Code', configRoot: root, executable })];
+    const found = instance({ agentId: 'claude-code', name: 'Claude Code', configRoot: root, executable });
+    discoveredHomes.set(found.id, homeDir);
+    return [found];
   },
   async scan(context: ScanContext): Promise<ScanReport> {
     const bindings: Binding[] = [];
     const diagnostics: string[] = [];
     const root = context.instance.configRoot;
-    const homeDir = path.dirname(root);
+    const homeDir = discoveredHomes.get(context.instance.id) ?? path.dirname(root);
     const globalSkillRoots = [path.join(root, 'skills')];
     const projectSkillRoots = context.project ? [
       path.join(context.project.rootPath, '.claude', 'skills'),
@@ -488,7 +520,11 @@ export const claudeCodeAdapter: AgentAdapter = {
     }
     for (const skillRoot of projectSkillRoots) {
       if (!(await isSafePathWithin(context.project!.rootPath, skillRoot))) continue;
-      bindings.push(...await scanSkillRoot({ root: skillRoot, context, scope: 'project', sourceKind: 'repository', projectId: context.project!.id, origin: 'filesystem', diagnostics }));
+      bindings.push(...await scanSkillRoot({ root: skillRoot, context, scope: 'project', sourceKind: 'repository', projectId: context.project!.id, origin: 'filesystem', diagnostics,
+        ...(skillRoot === path.join(context.project!.rootPath, '.agents', 'skills') ? {
+          location: { category: 'project' as const, rootPath: skillRoot, evidencePath: skillRoot,
+            reason: '已登记项目的公共 .agents/skills 来源；适配器发现不证明此客户端已加载。' },
+        } : {}) }));
     }
 
     const userSettingsPath = path.join(root, 'settings.json');
@@ -503,24 +539,29 @@ export const claudeCodeAdapter: AgentAdapter = {
     if (!localSettingsSafe) diagnostics.push('Claude 本地项目设置跨越符号链接或 junction，已跳过。');
     const projectSettings = projectSettingsSafe && projectSettingsPath ? await readSettings(projectSettingsPath, diagnostics, 'Claude project settings') : null;
     const localSettings = localSettingsSafe && localSettingsPath ? await readSettings(localSettingsPath, diagnostics, 'Claude local project settings') : null;
-    const projectOverrideSettings = { ...(projectSettings ?? {}), ...(localSettings ?? {}) };
     const overrides = [
       { settings: userSettings, sourcePath: userSettingsPath, source: 'user' as const, scope: 'user-global' as const, projectId: null },
       ...(context.project ? [
-        { settings: projectOverrideSettings, sourcePath: localSettings?.skillOverrides ? localSettingsPath : projectSettingsPath, source: 'repository' as const, scope: 'project' as const, projectId: context.project.id },
+        { settings: projectSettings, sourcePath: projectSettingsPath, source: 'repository' as const, scope: 'project' as const, projectId: context.project.id },
+        { settings: localSettings, sourcePath: localSettingsPath, source: 'repository' as const, scope: 'project' as const, projectId: context.project.id },
       ] : []),
     ];
     for (const source of overrides) {
       const skillOverrides = object(source.settings?.skillOverrides);
       if (!skillOverrides) continue;
-      for (const [name, rawState] of Object.entries(skillOverrides)) {
-        const state = enabledFrom(rawState);
-        if (state === null) continue;
+      for (const [name, rawState] of Object.entries(skillOverrides).slice(0, 300)) {
+        const visibility = typeof rawState === 'string' && ['on', 'name-only', 'user-invocable-only', 'off'].includes(rawState)
+          ? rawState as 'on' | 'name-only' | 'user-invocable-only' | 'off' : undefined;
+        const state = visibility ? visibility !== 'off' : null;
+        const control = { mode: 'independent' as const, ...(visibility ? { visibility } : {}),
+          reason: visibility ? `Claude skillOverrides 的显式可见性 ${visibility}；仅为该设置层的记录，不代表所有权限、frontmatter 和最终配置合成。`
+            : 'Claude skillOverrides 值不是官方四种可见性状态，未推断启用。' };
         const matches = bindings.filter((binding) => binding.kind === 'skill'
-          && binding.name === name
+          && (binding.displayName ?? binding.name) === name
           && binding.sourceKind === source.source
           && binding.scope === source.scope
           && binding.parentId === null
+          && binding.classification?.agentId === 'claude-code'
           && [...globalSkillRoots, ...projectSkillRoots].some((root) => path.dirname(binding.sourcePath) === root));
         if (matches.length > 0) {
           for (const binding of matches) {
@@ -528,18 +569,21 @@ export const claudeCodeAdapter: AgentAdapter = {
             binding.configurationEnabled = state;
             binding.configurationSourcePath = source.sourcePath;
             binding.configurationKey = `skillOverrides.${name}`;
-            binding.diagnostics.push('生效状态来自 Claude Code 的名字级 Skill 覆盖。');
+            binding.configurationControl = control;
+            binding.diagnostics.push('可见性记录来自 Claude Code 的名字级 Skill 覆盖；不确认当前会话生效。');
           }
           continue;
         }
-        bindings.push(baseBinding({
+        const override = baseBinding({
           context, kind: 'skill', name, scope: source.scope, sourceKind: source.source, sourcePath: source.sourcePath,
           projectId: source.projectId, nativeKey: `skillOverrides.${name}`, enabled: state,
           origin: 'configuration', configurationSourcePath: source.sourcePath,
           configurationKey: `skillOverrides.${name}`, configurationEnabled: state,
           diagnostics: ['这是名字级覆盖，可能影响多个同名 Skill。'],
           readOnlyReason: '版本验证前，Claude Code Skill 覆盖未开放写入。',
-        }));
+        });
+        override.configurationControl = control;
+        bindings.push(override);
       }
     }
 
@@ -549,6 +593,18 @@ export const claudeCodeAdapter: AgentAdapter = {
     const userState = userMcpSafe ? await safeMcpFile<unknown>(userMcpPath, diagnostics, 'Claude user MCP state') : null;
     bindings.push(...addMcpEntries({ context, file: userMcpPath, entries: object(userState)?.mcpServers, sourceKind: 'user', diagnostics, label: 'User MCP' }));
     if (context.project) {
+      const projects = object(object(userState)?.projects);
+      for (const [registeredPath, rawProject] of Object.entries(projects ?? {})) {
+        if (!path.isAbsolute(registeredPath) || !samePath(registeredPath, context.project.rootPath)) continue;
+        const local = addMcpEntries({ context, file: userMcpPath, entries: object(rawProject)?.mcpServers,
+          sourceKind: 'user', projectId: context.project.id, diagnostics, label: 'Claude project-local MCP',
+          configurationKey: `projects[${JSON.stringify(registeredPath)}].mcpServers` });
+        for (const binding of local) if (binding.classification) binding.classification.location = {
+          category: 'agent-global', rootPath: homeDir, evidencePath: userMcpPath,
+          reason: '项目私有 MCP 声明保存在用户 .claude.json 中；配置使用范围属于已登记项目，原文仍位于用户目录。',
+        };
+        bindings.push(...local);
+      }
       const projectMcpPath = path.join(context.project.rootPath, '.mcp.json');
       const projectMcpSafe = !(await existsRegularFile(projectMcpPath)) || await isSafePathWithin(context.project.rootPath, projectMcpPath);
       if (!projectMcpSafe) diagnostics.push('Claude 项目 MCP 配置跨越符号链接或 junction，已跳过。');
@@ -562,6 +618,7 @@ export const claudeCodeAdapter: AgentAdapter = {
     });
     bindings.push(...pluginBindings);
     bindings.push(...await scanClaudeFilesystemPlugins(context, diagnostics));
+    await markClaudeToggleTargets(context, bindings);
     return report(bindings, diagnostics);
   },
 };
