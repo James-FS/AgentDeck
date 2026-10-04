@@ -1,8 +1,8 @@
 # AgentDeck
 
-初期版本聚焦已有 MCP、插件和 Skill 的查看、来源/范围/配置状态、经验证的单项启停，以及变更预览、备份和恢复。没有原生依据的控制能力明确只读。组合分发、导入部署、主动诊断、安装更新、桌面壳、多平台和 SDK 初期不实现；详细范围见 [实施方案](docs/实施方案.md)和[开发任务清单](docs/开发任务清单.md)。
+当前版本聚焦本机 MCP、插件和 Skill 的资源归类、范围、所属 Agent、来源与配置状态。客户端适用性和运行状态展示已取消，运行状态 API 已删除；列表支持直接单项启停，保留预览、备份和恢复。新增 ZCode 用户级明确开关控制，其他设置不改，详见[资源启停说明](docs/资源启停说明.md)。没有原生依据的控制能力明确只读。组合分发、导入部署、主动诊断、安装更新、桌面壳、多平台和 SDK 初期不实现；文档入口见[文档索引](docs/文档索引.md)，详细范围见 [实施方案](docs/实施方案.md)和[开发任务清单](docs/开发任务清单.md)。
 
-基础版现已支持 Codex 配置根独立 Skill 和已配置的本地市场插件整体开关，限定已检查的 CLI 0.159.2 / Windows、手动明确可写实例；复用预览、备份、冲突检测与精确恢复，不修改 Skill 原文或插件缓存。启动和支持范围见 [基础版使用与验收](docs/基础版使用与验收.md)。
+基础版现已支持 Codex 配置根独立 Skill 和已配置的本地市场插件整体开关，限定已检查的 CLI 0.159.2 / Windows、默认允许受支持开关、可显式登记只读；复用预览、备份、冲突检测与精确恢复，不修改 Skill 原文或插件缓存。启动和支持范围见 [基础版使用与验收](docs/基础版使用与验收.md)。
 
 ## 快速开始
 
@@ -17,19 +17,19 @@ pnpm dev
 
 开发数据和默认扫描 home 位于 `work/dev-data` 与 `work/dev-data/home`，隔离演示文件位于 `work/demo`。可用 `AGENTDECK_DEV_HOME` 指定开发扫描 home。生产时用 `AGENTDECK_HOME` 指定管理器数据目录，或用 `USER_HOME` / `AGENTDECK_USER_HOME` 指定扫描 home。客户端自己的 `CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`DSH_HOME` 等环境变量仍可选择客户端配置根目录。
 
-首次打开资源页，点击“发现并扫描本机资源”读取当前用户的实际客户端配置；这会跳过开发模式默认的隔离扫描目录。扫描结果保存到本地索引，真实配置不会被改写。“重新扫描已登记实例”只刷新已经接入的目录。也可以载入隔离演示数据体验交互。
+首次打开资源页，点击“发现并扫描本机资源”读取当前用户的实际客户端配置；这会跳过开发模式默认的隔离扫描目录。扫描结果保存到本地索引，真实配置不会被改写。“重新扫描已登记实例”刷新已经接入的实例；未选项目时同时刷新全部明确登记的项目，不寻找未登记项目。也可以载入隔离演示数据体验交互。
 
-自动发现的实例只读。只有手动登记并明确勾选可写的 Codex 实例可生成受支持的独立 MCP 计划；演示目标使用独立文件。本机只读配置与插件缓存布局已经核对，见 [只读扫描兼容验证](docs/只读扫描兼容验证.md)。实际 Codex CLI 0.159.2 已在 Windows 隔离配置根完成独立用户级 STDIO MCP 的启停、原生复读与恢复验收，见 [客户端兼容与原生验收](docs/客户端兼容与原生验收.md)；用户真实配置仍未作为写入目标，运行时生效未验证。未匹配版本或范围的能力保持实验性或只读。原始计划字节和恢复快照可能包含秘密；当前保存为明文，没有额外加密或显式设置 Windows ACL，Windows 使用数据目录继承的系统 ACL。请将 `AGENTDECK_HOME` 放在仅当前用户可访问的位置，不要使用共享目录。
+自动发现与手动登记默认允许受支持的 Codex/ZCode 用户级资源启停，无需“开放启停”；可显式登记只读。演示目标使用独立文件。本机只读配置与插件缓存布局已经核对，见 [只读扫描兼容验证](docs/只读扫描兼容验证.md)。实际 Codex CLI 0.159.2 已在 Windows 隔离配置根完成独立用户级 STDIO MCP 的启停、原生复读与恢复验收，见 [客户端兼容与原生验收](docs/客户端兼容与原生验收.md)；用户真实配置仍未作为写入目标，运行时生效未验证。未匹配版本或范围的能力保持实验性或只读。原始计划字节和恢复快照可能包含秘密；当前保存为明文，没有额外加密或显式设置 Windows ACL，Windows 使用数据目录继承的系统 ACL。请将 `AGENTDECK_HOME` 放在仅当前用户可访问的位置，不要使用共享目录。
 
 AgentDeck is a local web manager for viewing Agent configuration instances, projects, Skills, plugins, and MCP entries. The first release provides a Vue 3 interface, a Fastify local API, SQLite persistence, four read-only adapter scanners, and a guarded Codex MCP plan/apply/restore path.
 
-Read-only configuration and plugin cache layouts have been checked on this Windows machine. Codex CLI 0.159.2 has additionally passed native configuration reread and toggle/restore validation for independent user STDIO MCP entries in isolated configuration roots; see [the native compatibility report](docs/客户端兼容与原生验收.md). Runtime activation remains unverified. Automatic discovery is read-only. A write plan is available only for an explicitly registered Codex configuration root marked writable, and only for a supported independent MCP entry. The demo has a separate, isolated Codex target. The app does not start Skills, plugins, or MCP processes. An explicit version check runs only the supported CLI's bounded `--version` command in an isolated environment.
+Read-only configuration and plugin cache layouts have been checked on this Windows machine. Codex CLI 0.159.2 has additionally passed native configuration reread and toggle/restore validation for independent user STDIO MCP entries in isolated configuration roots; see [the native compatibility report](docs/客户端兼容与原生验收.md). Runtime activation remains unverified. Supported Codex and ZCode switches are allowed by default for discovered and registered instances; an explicit read-only choice is respected. A write plan still requires a verified toggle target. The demo has a separate, isolated Codex target. The app does not start Skills, plugins, or MCP processes. An explicit version check runs only the supported CLI's bounded `--version` command in an isolated environment.
 
-插件缓存按市场、插件身份与版本建立父子索引。资源页可区分缓存、配置记录和本地文件；详情分别展示资源配置状态、关联配置证据、缓存状态与未知运行状态。登记项目后点击项目卡片的“扫描项目”，读取该项目范围的候选配置和 Skills；项目配置及插件资源保持只读。
+插件缓存按市场、插件身份与版本建立父子索引。资源页可区分缓存、配置记录和本地文件；详情展示资源配置状态、关联配置证据、缓存状态、实际存放位置和分类依据。登记项目后点击项目卡片的“扫描项目”，读取该项目范围的候选配置和 Skills；项目配置及插件资源保持只读。
 
-运行证据报告将配置启用、当前会话加载 Skill/插件、当前会话 MCP 连接分开；缺少可归属到现有客户端会话的证据时显示“暂未检测”。详见 [运行状态检测](docs/运行状态检测.md)。
+资源归类分为用户全局来源、项目公共来源、Agent 全局资源、Agent 项目资源、待确定；存放归属与配置/使用范围分开。用户全局不代表所有 Agent 共用，所属 Agent 不表示内容专用；共享来源需要同一实际来源的多 Agent 索引证据。
 
-实例页提供客户端兼容报告，区分已识别 CLI、未验证的可执行候选、仅有配置、未发现和隔离演示。显式检查版本后，证据按可执行路径及文件身份保存；替换、删除或检查失败使旧证据失效。静态扫描、夹具、原生配置和运行时证据分别展示。检查版本不会开放写入许可。机器可读验收矩阵位于 [docs/compatibility.json](docs/compatibility.json)。
+实例页提供客户端兼容报告，区分已识别 CLI、未验证的可执行候选、仅有配置、未发现和隔离演示。显式检查版本后，证据按可执行路径及文件身份保存；替换、删除或检查失败使旧证据失效。静态扫描、夹具与原生配置证据分别展示，不评估资源内容适用性。检查版本不会开放写入许可。机器可读验收矩阵位于 [docs/compatibility.json](docs/compatibility.json)。
 
 ## Requirements
 
@@ -73,13 +73,12 @@ The JSON API is under `/api/v1`. Useful routes are:
 
 - `GET /health` — startup status and application version, without filesystem paths or credentials.
 - `GET /api/v1/adapters` and `GET /api/v1/catalog` — adapter capabilities and the current local catalog.
-- `GET /api/v1/runtime` — read-only evidence availability for session loading and MCP connection, separate from configuration state.
 - `GET /api/v1/compatibility` — client identity observations and capability evidence, including unregistered adapters.
 - `POST /api/v1/instances/:id/version-check` with `{}` — explicitly query a supported CLI version in isolated state; command paths cannot be supplied by the browser.
 - `POST /api/v1/instances` and `POST /api/v1/projects` — explicitly register a configuration root or project.
 - `POST /api/v1/scans` — scan registered instances, optionally discover instances or select a project.
 - `POST /api/v1/demo` — create or refresh the isolated example catalog.
-- `POST /api/v1/plans` — prepare a Codex MCP toggle; the returned plan contains a redacted diff and digest.
+- `POST /api/v1/plans` — prepare a supported Codex or ZCode resource configuration toggle; the returned plan contains a redacted diff and digest.
 - `POST /api/v1/plans/:id/apply` — apply the reviewed plan using its `afterHash` as `digest`.
 - `GET /api/v1/operations` and `POST /api/v1/operations/:id/restore-plan` — inspect operations and prepare a restore plan.
 - `GET /api/v1/events` — authenticated SSE updates for catalog and operation changes.
@@ -100,4 +99,4 @@ pnpm test:e2e
 
 Build before running the browser test because it starts the compiled server and serves `apps/web/dist`. Playwright uses an installed Edge or Chrome from its standard Windows path, or `AGENTDECK_BROWSER_PATH` if set. For example, in PowerShell: `$env:AGENTDECK_BROWSER_PATH='C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'`. Browser artifacts and temporary data are written under the ignored `work/` directory.
 
-The compatibility, write, and recovery limits in [`docs/首轮实施决策.md`](docs/首轮实施决策.md) and [`docs/实施方案.md`](docs/实施方案.md) describe the current scope. A local sample passing does not count as validation against an installed client version.
+The current scope and configuration control limits are documented in [the documentation index](docs/文档索引.md) and section 1.0 of [the implementation plan](docs/实施方案.md). First-round reports record historical evidence. A local sample passing does not count as validation against an installed client version.
