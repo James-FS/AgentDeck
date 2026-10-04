@@ -72,6 +72,8 @@ export function buildCapabilityEvidence(args: {
   agentId: AgentId;
   versionEvidence: ClientVersionEvidence | null;
   optedInCodexWrite: boolean;
+  optedInZCodeWrite?: boolean;
+  optedInProfileWrite?: boolean;
 }): CapabilityEvidence[] {
   const result: CapabilityEvidence[] = [];
   const rows = coverage[args.agentId];
@@ -92,13 +94,17 @@ export function buildCapabilityEvidence(args: {
     const codexPlugin = args.agentId === 'codex' && row.kind === 'plugin' && row.scope === 'native' && row.sourceKind === 'plugin';
     const basicControl = codexSkill ? 'user-config-skill' as const : codexPlugin ? 'local-marketplace-plugin' as const : undefined;
     const basicNativeVerified = Boolean(basicControl && args.versionEvidence?.version === '0.159.2' && args.versionEvidence.platform === 'win32');
+    const zcodeSwitch = args.agentId === 'zcode' && (row.kind === 'skill' && (row.scope === 'user-global' || row.scope === 'native')
+      || row.kind === 'plugin' && row.scope === 'native' || row.kind === 'mcp' && row.scope === 'native' && row.sourceKind === 'user');
+    const profileSwitch = ['claude-code', 'deepseek-harness'].includes(args.agentId)
+      && row.kind === 'plugin' && row.scope === 'native' && (row.sourceKind === 'user' || args.agentId === 'claude-code' && row.sourceKind === 'plugin');
     result.push(evidence({
       area: 'fixture-validation', row, status: partialCoverage ? 'partial' : 'verified', readable: true,
-      writable: (codexUserMcp || basicNativeVerified) && args.optedInCodexWrite,
-      operations: codexUserMcp || basicControl ? ['scan', 'toggle', 'restore'] : ['scan'],
+      writable: ((codexUserMcp || basicNativeVerified) && args.optedInCodexWrite) || zcodeSwitch && args.optedInZCodeWrite === true || profileSwitch && args.optedInProfileWrite === true,
+      operations: codexUserMcp || basicControl || zcodeSwitch || profileSwitch ? ['scan', 'toggle', 'restore'] : ['scan'],
       ...(codexUserMcp ? { controlScope: 'standalone-user-mcp' as const } : basicControl ? { controlScope: basicControl } : {}),
-      reference: basicControl ? 'tests/codex-controls.test.ts' : codexUserMcp ? 'tests/adapters.test.ts; tests/change-engine.test.ts; tests/server.test.ts' : reference,
-      reason: basicControl ? '隔离测试覆盖配置根独立 Skill 的按路径覆盖，以及已配置本地市场插件的身份级开关；其他来源保持只读。' : codexUserMcp
+      reference: profileSwitch ? 'tests/profile-controls.test.ts; tests/browser/profile-controls.spec.ts' : zcodeSwitch ? 'tests/zcode-controls.test.ts; tests/browser/zcode-controls.spec.ts' : basicControl ? 'tests/codex-controls.test.ts' : codexUserMcp ? 'tests/adapters.test.ts; tests/change-engine.test.ts; tests/server.test.ts' : reference,
+      reason: profileSwitch ? '仅控制已有用户设置中的 Claude 插件身份开关或 DSH 唯一静态插件行的 disabled 布尔值；绑定须通过路径和结构校验，项目、动态层、必需组件及安装原文只读，不证明最终层叠或会话生效。' : zcodeSwitch ? '隔离测试覆盖现有 ZCode 用户配置的单个布尔开关及备份恢复；默认开放受支持实例且绑定有可验证开关地址时可写，显式只读除外，不创建配置文件、不启动客户端、不修改其他设置。' : basicControl ? '隔离测试覆盖配置根独立 Skill 的按路径覆盖，以及已配置本地市场插件的身份级开关；其他来源保持只读。' : codexUserMcp
         ? '夹具与隔离变更引擎测试验证了独立用户级 MCP 的扫描、启停与恢复；客户端原生加载行为另行验证。'
         : partialCoverage
           ? '夹具测试仅覆盖声明静态来源的有限部分；不代表官方运行时语义。'

@@ -3,6 +3,12 @@ import { z } from 'zod';
 export const AGENT_IDS = ['codex', 'claude-code', 'zcode', 'deepseek-harness'] as const;
 export type AgentId = (typeof AGENT_IDS)[number];
 export type ResourceKind = 'skill' | 'plugin' | 'mcp';
+export const ConfigurationControlSchema = z.object({
+  mode: z.enum(['independent', 'parent', 'none', 'unknown']),
+  reason: z.string().min(1),
+  visibility: z.enum(['on', 'name-only', 'user-invocable-only', 'off']).optional(),
+});
+export type ConfigurationControl = z.infer<typeof ConfigurationControlSchema>;
 export type SkillScope = 'user-global' | 'project' | 'project-directory' | 'native';
 export type SourceKind = 'user' | 'repository' | 'plugin' | 'builtin' | 'organization' | 'account-sync' | 'unknown';
 export type CompatibilityClass = 'portable' | 'agent-specific' | 'conditional' | 'unknown';
@@ -76,6 +82,12 @@ export interface AgentInstance {
   executable: string | null;
   discovery: DiscoveryKind;
   writable: boolean;
+  /** Distinguishes the current switch default / explicit read-only choice from legacy permissions. */
+  togglePolicy?: 'default' | 'read-only';
+  /** Tracks migration when additional adapters gain default switch support. */
+  togglePolicyVersion?: 1;
+  /** Read-only installation metadata, separate from the writable configuration root. */
+  desktopResourceRoot?: string;
   checkedAt: string;
   diagnostics: string[];
   /** Optional for compatibility with older persisted instance JSON. */
@@ -84,7 +96,39 @@ export interface AgentInstance {
 
 export interface Project { id: string; name: string; rootPath: string }
 
+/** Inventory evidence is independent of native control scope and content compatibility. */
+export type ResourceInventoryCategory = 'user-global' | 'project' | 'agent-global' | 'agent-project' | 'unknown';
+export interface ResourceClassification {
+  /** Resource binding classification; physical cache location may differ for project references. */
+  category?: ResourceInventoryCategory;
+  scope: 'user-global' | 'project' | 'project-directory' | 'unknown';
+  agentId: string | null;
+  /** AgentDeck reader identity; never evidence of native client loading or ownership. */
+  discoveredByAgentId?: string;
+  relationship: 'configured' | 'discovered' | 'unknown';
+  projectName: string | null;
+  projectRoot: string | null;
+  evidencePath: string;
+  sourceIdentity?: string;
+  reason: string;
+  /** Same physical source observed under multiple Agents; never inferred from its name. */
+  sharedSource?: { path: string; agentIds: string[]; bindingIds: string[] };
+  contentCompatibility: 'unknown';
+  /** Inventory location is not the effective configuration or installation scope. */
+  location?: {
+    category: ResourceInventoryCategory;
+    rootPath: string | null;
+    evidencePath: string;
+    reason: string;
+  };
+  installationEvidence?: { path: string; scope: 'user-global' | 'project' | 'unknown'; reason: string };
+}
+
 export interface Binding {
+  /** Verified bundled file proving built-in origin; never a write target. */
+  builtinSourcePath?: string;
+  /** Absent on older indexes: rescan to obtain classification evidence. */
+  classification?: ResourceClassification;
   id: string;
   resourceId: string;
   instanceId: string;
@@ -105,7 +149,14 @@ export interface Binding {
   sourcePath: string;
   nativeKey: string;
   enabled: boolean | null;
+  /** Static inventory rule or native setting evidence, never proof of session loading. */
+  configurationStateReason?: string;
+  /** Derived static toggle address; never accepted from a client request. */
+  toggleTarget?: { agentId: 'zcode' | 'claude-code'; path: string[]; defaultEnabled: boolean }
+    | { agentId: 'deepseek-harness'; kind: 'dsh-yaml'; configPath: string; id: string; name: string };
   runtime: RuntimeState;
+  /** Evidence of the switch mechanism, independent of whether it is currently enabled. */
+  configurationControl?: ConfigurationControl;
   writable: boolean;
   readOnlyReason: string | null;
   diagnostics: string[];
@@ -114,6 +165,8 @@ export interface Binding {
   origin?: 'configuration' | 'cache' | 'filesystem';
   pluginId?: string;
   pluginVersion?: string;
+  /** True only when a cached manifest name exactly matches its package identity. */
+  pluginIdentityVerified?: boolean;
   marketplace?: string;
   configurationSourcePath?: string;
   configurationKey?: string;
@@ -202,26 +255,38 @@ export interface AgentAdapter {
 }
 
 export const AgentIdSchema = z.enum(AGENT_IDS);
+const InventoryCategorySchema = z.enum(['user-global', 'project', 'agent-global', 'agent-project', 'unknown']);
+export const ResourceClassificationSchema = z.object({
+  scope: z.enum(['user-global', 'project', 'project-directory', 'unknown']),
+  agentId: z.string().nullable(), discoveredByAgentId: z.string().optional(), relationship: z.enum(['configured', 'discovered', 'unknown']),
+  projectName: z.string().nullable(), projectRoot: z.string().nullable(),
+  evidencePath: z.string(), reason: z.string(), sourceIdentity: z.string().optional(),
+  contentCompatibility: z.literal('unknown'), category: InventoryCategorySchema.optional(),
+  location: z.object({ category: InventoryCategorySchema, rootPath: z.string().nullable(), evidencePath: z.string(), reason: z.string() }).optional(),
+  installationEvidence: z.object({ path: z.string(), scope: z.enum(['user-global', 'project', 'unknown']), reason: z.string() }).optional(),
+  sharedSource: z.object({ path: z.string(), agentIds: z.array(z.string()), bindingIds: z.array(z.string()) }).optional(),
+});
 export const RegisterInstanceSchema = z.object({
-  agentId: z.string().min(1),
-  name: z.string().trim().min(1).max(120).optional(),
-  configRoot: z.string().trim().min(1),
-  writable: z.boolean().optional().default(false),
+  agentId: z.string().min(1, '请选择客户端'),
+  name: z.string().trim().min(1).max(120, '实例名称不能超过 120 个字符').optional(),
+  configRoot: z.string().trim().min(1, '请填写配置根目录'),
+  writable: z.boolean().optional().default(true),
 });
 export const RegisterProjectSchema = z.object({
-  name: z.string().trim().min(1).max(160).optional(),
-  rootPath: z.string().trim().min(1),
+  name: z.string().trim().min(1).max(160, '项目名称不能超过 160 个字符').optional(),
+  rootPath: z.string().trim().min(1, '请填写项目根目录'),
 });
 export const ScanRequestSchema = z.object({
   discover: z.boolean().optional().default(false),
   discoverUserHome: z.boolean().optional().default(false),
   instanceId: z.string().optional(),
   projectId: z.string().optional(),
+  scanRegisteredProjects: z.boolean().optional().default(false),
 });
 export const VersionCheckRequestSchema = z.object({}).strict();
-export const CreatePlanSchema = z.object({ bindingId: z.string().min(1), enabled: z.boolean() });
-export const ApplyPlanSchema = z.object({ digest: z.string().min(1) });
-export const BootstrapSchema = z.object({ ticket: z.string().min(1) });
+export const CreatePlanSchema = z.object({ bindingId: z.string().min(1, '缺少资源绑定 ID'), enabled: z.boolean() });
+export const ApplyPlanSchema = z.object({ digest: z.string().min(1, '需要提交计划摘要') });
+export const BootstrapSchema = z.object({ ticket: z.string().min(1, '需要一次性启动票据') });
 
 export interface SessionResponse { csrfToken: string }
 export interface SseEvent<T = unknown> {

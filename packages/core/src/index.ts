@@ -12,12 +12,11 @@ import {
   type ExecutableResolver, type VersionCheckRunner,
 } from './version-check.js';
 import { buildCapabilityEvidence } from './compatibility.js';
-import { assessRuntimeEvidence, type RuntimeEvidenceProvider } from './runtime.js';
-export type { RuntimeEvidenceProvider, RuntimeEvidenceSnapshot, VerifiedClientSession, McpSessionEvidence } from './runtime.js';
+import { classifyCatalog } from './classification.js';
 
 type RegisterInstanceInput = { agentId: string; name?: string; configRoot: string; writable?: boolean };
 type RegisterProjectInput = { name?: string; rootPath: string };
-type ScanInput = { discover?: boolean; instanceId?: string; projectId?: string; discoveryContext?: { homeDir: string; env: NodeJS.ProcessEnv } };
+type ScanInput = { discover?: boolean; instanceId?: string; projectId?: string; scanRegisteredProjects?: boolean; discoveryContext?: { homeDir: string; env: NodeJS.ProcessEnv } };
 
 export interface ManagerOptions {
   store: ManagerStore;
@@ -30,7 +29,6 @@ export interface ManagerOptions {
   versionRunner?: VersionCheckRunner;
   platform?: NodeJS.Platform;
   now?: () => Date;
-  runtimeEvidenceProvider?: RuntimeEvidenceProvider;
 }
 
 export interface ManagerStore {
@@ -54,7 +52,6 @@ export class ManagerService {
   readonly versionRunner: VersionCheckRunner;
   readonly platform: NodeJS.Platform;
   private readonly now: () => Date;
-  private readonly runtimeEvidenceProvider: RuntimeEvidenceProvider | undefined;
 
   constructor(options: ManagerOptions) {
     this.store = options.store;
@@ -67,21 +64,9 @@ export class ManagerService {
     this.versionRunner = options.versionRunner ?? runVersionCommand;
     this.platform = options.platform ?? process.platform;
     this.now = options.now ?? (() => new Date());
-    this.runtimeEvidenceProvider = options.runtimeEvidenceProvider;
   }
 
-  catalog(): Catalog { return this.store.catalog(); }
-  async runtimeReport() {
-    const catalog = this.store.catalog();
-    if (!this.runtimeEvidenceProvider) return assessRuntimeEvidence(catalog, this.now());
-    try {
-      const snapshot = await this.runtimeEvidenceProvider.readCurrentEvidence(catalog);
-      return assessRuntimeEvidence(catalog, this.now(), snapshot);
-    } catch {
-      // A provider failure never becomes a resource failure or exposes its raw response.
-      return assessRuntimeEvidence(catalog, this.now());
-    }
-  }
+  catalog(): Catalog { return classifyCatalog(this.store.catalog()); }
   adapterInfos(): AdapterInfo[] { return this.adapters.map(adapter => adapter.info); }
 
   async compatibilityReport(): Promise<CompatibilityReport> {
@@ -211,7 +196,9 @@ export class ManagerService {
       versionEvidence: refreshedEvidence, checkedAt: refreshedEvidence?.checkedAt ?? refreshed.checkedAt ?? null,
       capabilities: isAgentId(refreshed.agentId) ? buildCapabilityEvidence({
         agentId: refreshed.agentId, versionEvidence: refreshedEvidence,
-        optedInCodexWrite: refreshed.agentId === 'codex' && refreshed.discovery === 'manual' && refreshed.writable,
+        optedInCodexWrite: refreshed.agentId === 'codex' && refreshed.discovery !== 'demo' && refreshed.writable,
+        optedInZCodeWrite: refreshed.agentId === 'zcode' && refreshed.discovery !== 'demo' && refreshed.writable,
+        optedInProfileWrite: ['claude-code', 'deepseek-harness'].includes(refreshed.agentId) && refreshed.discovery !== 'demo' && refreshed.writable,
       }) : [],
       diagnostics: [...new Set(diagnostics)],
     };
@@ -326,10 +313,13 @@ export class ManagerService {
       executable: existing?.executable ?? null,
       ...(existing?.versionEvidence ? { versionEvidence: existing.versionEvidence } : { versionEvidence: null }),
       discovery,
-      // Writing is intentionally limited to explicit user registration of a Codex root.
-      writable: input.writable === true && input.agentId === 'codex',
+      ...(existing?.desktopResourceRoot ? { desktopResourceRoot: existing.desktopResourceRoot } : {}),
+      // Supported switches are enabled by default; explicit read-only registration remains available.
+      writable: input.writable !== false && isAgentId(input.agentId),
+      togglePolicy: input.writable === false ? 'read-only' : 'default',
+      togglePolicyVersion: 1,
       checkedAt: this.now().toISOString(),
-      diagnostics: [...(existing?.diagnostics ?? []), ...(input.writable === true && input.agentId !== 'codex'
+      diagnostics: [...(existing?.diagnostics ?? []), ...(input.writable === true && !isAgentId(input.agentId)
         ? ['该适配器本轮没有写入支持；登记为只读。']
         : [])],
     };
@@ -371,6 +361,7 @@ export class ManagerService {
             // Rediscovery refreshes identity but never revokes a deliberate write opt-in.
             this.store.putInstance({
               ...existing, version: oldEvidence?.version ?? null, versionEvidence: oldEvidence,
+              ...(found.desktopResourceRoot ? { desktopResourceRoot: found.desktopResourceRoot } : {}),
               executable: executable?.path ?? null, checkedAt: this.now().toISOString(), diagnostics,
             });
             continue;
@@ -381,7 +372,9 @@ export class ManagerService {
             configRoot: existing?.configRoot ?? configRoot,
             agentId: adapter.id,
             discovery: 'auto',
-            writable: false,
+            writable: isAgentId(adapter.id),
+            togglePolicy: 'default',
+            togglePolicyVersion: 1,
             executable: executable?.path ?? null,
             version: oldEvidence?.version ?? null,
             versionEvidence: oldEvidence,
@@ -405,17 +398,28 @@ export class ManagerService {
     for (const instance of instances) {
       const adapter = this.adapter(instance.agentId);
       if (!adapter) continue;
+      // Upgrade legacy permissions once; preserve subsequent explicit read-only choices.
+      if (instance.discovery !== 'demo' && isAgentId(instance.agentId) && (!instance.togglePolicy
+        || ['claude-code', 'deepseek-harness'].includes(instance.agentId) && instance.togglePolicy === 'default' && !instance.togglePolicyVersion)) {
+        instance.writable = true;
+        instance.togglePolicy = 'default';
+        instance.togglePolicyVersion = 1;
+        this.store.putInstance(instance);
+      }
       try {
         const report = await adapter.scan(project ? { instance, project } : { instance });
         const scanned = report.bindings.map(binding => {
           const demoCodexMcp = instance.discovery === 'demo' && instance.agentId === 'codex' && binding.kind === 'mcp' && binding.name === 'agentdeck-demo' && binding.writable && isInside(binding.sourcePath, instance.configRoot);
-          const explicitlyWritableCodex = instance.discovery === 'manual' && instance.agentId === 'codex' && instance.writable && binding.writable;
-          const writable = Boolean(demoCodexMcp || explicitlyWritableCodex);
+          const explicitlyWritableCodex = instance.discovery !== 'demo' && instance.agentId === 'codex' && instance.writable && binding.writable;
+          const explicitlyWritableZCode = instance.discovery !== 'demo' && instance.agentId === 'zcode' && instance.writable && binding.writable && binding.toggleTarget?.agentId === 'zcode';
+          const explicitlyWritableProfile = instance.discovery !== 'demo' && ['claude-code', 'deepseek-harness'].includes(instance.agentId)
+            && instance.writable && binding.writable && binding.toggleTarget?.agentId === instance.agentId;
+          const writable = Boolean(demoCodexMcp || explicitlyWritableCodex || explicitlyWritableZCode || explicitlyWritableProfile);
           return {
           ...binding,
           instanceId: instance.id,
           writable,
-          readOnlyReason: writable ? null : binding.readOnlyReason ?? (instance.discovery === 'auto' ? '自动发现的实例固定只读。' : '该资源没有已验证的写入机制。'),
+          readOnlyReason: writable ? null : binding.readOnlyReason ?? '该资源没有已验证的写入机制。',
           runtime: binding.runtime ?? 'unknown',
           diagnostics: [...binding.diagnostics, ...report.diagnostics],
           updatedAt: this.now().toISOString(),
@@ -436,8 +440,13 @@ export class ManagerService {
         if (prior) this.store.putInstance({ ...prior, diagnostics: [...prior.diagnostics, '扫描失败；保留上一次的索引。'] });
       }
     }
+    if (input.scanRegisteredProjects && !input.projectId) {
+      for (const registeredProject of this.store.catalog().projects) {
+        await this.scan({ projectId: registeredProject.id, ...(input.instanceId ? { instanceId: input.instanceId } : {}) });
+      }
+    }
     this.store.setMetadata('lastScanAt', this.now().toISOString());
-    return this.store.catalog();
+    return this.catalog();
   }
 
   async initializeDemo(): Promise<Catalog> {
@@ -475,7 +484,7 @@ export class ManagerService {
       await this.scan({ instanceId: instance.id });
     }
     this.store.setMetadata('lastScanAt', this.now().toISOString());
-    return this.store.catalog();
+    return this.catalog();
   }
 
   adapter(id: string): AgentAdapter | undefined { return this.adapters.find(item => item.id === id); }
