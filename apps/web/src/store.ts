@@ -1,12 +1,11 @@
 import { defineStore } from 'pinia';
-import type { AdapterInfo, Catalog, CompatibilityReport, RuntimeReport } from '@agentdeck/contracts';
+import type { AdapterInfo, Catalog, CompatibilityReport } from '@agentdeck/contracts';
 import { api, ApiFailure } from './api';
 
 interface AppState {
   catalog: Catalog | null;
   adapters: AdapterInfo[];
   compatibility: CompatibilityReport | null;
-  runtime: RuntimeReport | null;
   sessionReady: boolean;
   sessionError: string | null;
   busy: boolean;
@@ -20,7 +19,6 @@ export const useAppStore = defineStore('agentdeck', {
     catalog: null,
     adapters: [],
     compatibility: null,
-    runtime: null,
     sessionReady: false,
     sessionError: null,
     busy: false,
@@ -72,11 +70,9 @@ export const useAppStore = defineStore('agentdeck', {
       this.refreshError = null;
       try {
         const [catalog, adapters, compatibility] = await Promise.all([api.catalog(), api.adapters(), api.compatibility()]);
-        const runtime = await api.runtime();
         this.setCatalog(catalog);
         this.adapters = adapters;
         this.compatibility = compatibility;
-        this.runtime = runtime;
       } catch (error) {
         this.refreshError = error instanceof ApiFailure ? error.message : error instanceof Error ? error.message : '刷新失败。';
         throw error;

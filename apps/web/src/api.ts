@@ -11,9 +11,9 @@ import type {
   ExecutableIdentity,
   Operation,
   Project,
-  RuntimeReport,
   SessionResponse,
 } from '@agentdeck/contracts';
+import { ConfigurationControlSchema, ResourceClassificationSchema } from '@agentdeck/contracts';
 
 const API = '/api/v1';
 let csrfToken: string | null = null;
@@ -91,6 +91,17 @@ function validateCatalog(value: unknown): Catalog {
     && (entry.displayName === undefined || typeof entry.displayName === 'string')
     && (entry.discoveryOnly === undefined || typeof entry.discoveryOnly === 'boolean')
     && (entry.discoveryPath === undefined || typeof entry.discoveryPath === 'string')
+    && (entry.classification === undefined || ResourceClassificationSchema.safeParse(entry.classification).success)
+    && (entry.configurationControl === undefined || ConfigurationControlSchema.safeParse(entry.configurationControl).success)
+    && (entry.configurationStateReason === undefined || typeof entry.configurationStateReason === 'string')
+    && (entry.builtinSourcePath === undefined || typeof entry.builtinSourcePath === 'string')
+    && (entry.toggleTarget === undefined || isRecord(entry.toggleTarget)
+      && (['zcode', 'claude-code'].includes(String(entry.toggleTarget.agentId))
+        && Array.isArray(entry.toggleTarget.path) && entry.toggleTarget.path.length > 0 && entry.toggleTarget.path.every(key => typeof key === 'string')
+        && typeof entry.toggleTarget.defaultEnabled === 'boolean'
+        || entry.toggleTarget.agentId === 'deepseek-harness' && entry.toggleTarget.kind === 'dsh-yaml'
+          && typeof entry.toggleTarget.configPath === 'string' && typeof entry.toggleTarget.id === 'string' && typeof entry.toggleTarget.name === 'string'))
+    && (entry.pluginIdentityVerified === undefined || typeof entry.pluginIdentityVerified === 'boolean')
     && ['user-global', 'project', 'project-directory', 'native'].includes(String(entry.scope))
     && ['user', 'repository', 'plugin', 'builtin', 'organization', 'account-sync', 'unknown'].includes(String(entry.sourceKind))
     && ['portable', 'agent-specific', 'conditional', 'unknown'].includes(String(entry.compatibilityClass))
@@ -118,25 +129,6 @@ function validateCatalog(value: unknown): Catalog {
     throw new ApiFailure('服务返回的目录扫描时间格式无效。', 200, 'INVALID_RESPONSE');
   }
   return value as unknown as Catalog;
-}
-
-function validateRuntimeReport(value: unknown): RuntimeReport {
-  if (!isRecord(value) || typeof value.assessedAt !== 'string' || !Array.isArray(value.observations)
-    || !value.observations.every((entry) => isRecord(entry)
-      && typeof entry.bindingId === 'string' && typeof entry.instanceId === 'string'
-      && ['skill', 'plugin', 'mcp'].includes(String(entry.kind))
-      && (entry.configurationEnabled === null || typeof entry.configurationEnabled === 'boolean')
-      && typeof entry.indexUpdatedAt === 'string'
-      && ['not-checked', 'not-applicable'].includes(String(entry.sessionLoad))
-      && ['not-checked', 'not-applicable', 'not-started', 'starting', 'connected', 'authentication-required', 'failed', 'cancelled', 'disabled'].includes(String(entry.mcpConnection))
-      && (entry.clientSessionId === null || typeof entry.clientSessionId === 'string')
-      && (entry.threadId === null || typeof entry.threadId === 'string')
-      && (entry.evidenceSource === null || entry.evidenceSource === 'codex-app-server-session')
-      && (entry.observedAt === null || typeof entry.observedAt === 'string')
-      && typeof entry.reason === 'string')) {
-    throw new ApiFailure('服务返回的运行证据报告格式无效。', 200, 'INVALID_RESPONSE');
-  }
-  return value as unknown as RuntimeReport;
 }
 
 function validatePlan(value: unknown): ChangePlan {
@@ -255,10 +247,6 @@ export const api = {
     return validateCatalog(await request<unknown>(`${API}/catalog`));
   },
 
-  async runtime(): Promise<RuntimeReport> {
-    return validateRuntimeReport(await request<unknown>(`${API}/runtime`));
-  },
-
   async adapters(): Promise<AdapterInfo[]> {
     const response = await request<unknown>(`${API}/adapters`);
     const list = Array.isArray(response) ? response : isRecord(response) && Array.isArray(response.adapters) ? response.adapters : null;
@@ -281,7 +269,7 @@ export const api = {
     }));
   },
 
-  async scan(options: { discover?: boolean; discoverUserHome?: boolean; instanceId?: string; projectId?: string }): Promise<Catalog> {
+  async scan(options: { discover?: boolean; discoverUserHome?: boolean; instanceId?: string; projectId?: string; scanRegisteredProjects?: boolean }): Promise<Catalog> {
     return validateCatalog(await request<unknown>(`${API}/scans`, {
       method: 'POST',
       body: JSON.stringify(options),

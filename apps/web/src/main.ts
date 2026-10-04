@@ -1,8 +1,8 @@
 import { createApp } from 'vue';
 import { createPinia } from 'pinia';
-import ElementPlus from 'element-plus';
-import 'element-plus/dist/index.css';
+// 组件样式由 unplugin-vue-components 按需注入；ElMessage 是函数式调用，需要手动引入其样式。
+import 'element-plus/es/components/message/style/css';
 import './style.css';
 import App from './App.vue';
 
-createApp(App).use(createPinia()).use(ElementPlus).mount('#app');
+createApp(App).use(createPinia()).mount('#app');
