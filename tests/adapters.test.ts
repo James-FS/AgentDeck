@@ -143,7 +143,7 @@ describe('independent adapter verification', () => {
       const peer = report.bindings.find(item => item.sourcePath === otherGroup)!;
       expect(peer.discoveryPath).toBe('another-collection/grouped-review');
       expect(peer.id).not.toBe(skill.id);
-      expect(skill.enabled).toBeNull();
+      expect(skill.enabled).toBe(true);
       expect(skill.writable).toBe(false);
       expect(skill.runtime).toBe('unknown');
       expect(skill.diagnostics.some(message => message.includes('仅为磁盘发现'))).toBe(true);
@@ -171,7 +171,7 @@ describe('independent adapter verification', () => {
     const report = await adapter('claude-code').scan({ instance: instance('claude-code') });
     const skill = report.bindings.find(item => item.sourcePath === grouped)!;
     expect(skill.displayName).toBe('Displayed Review');
-    expect(skill.enabled).toBeNull();
+    expect(skill.enabled).toBe(true);
     expect(skill.configurationEnabled).toBeUndefined();
     expect(skill.runtime).toBe('unknown');
   });

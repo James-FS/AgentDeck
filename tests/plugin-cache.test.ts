@@ -38,7 +38,7 @@ describe('plugin cache and project source integrity', () => {
       }
     }
   }
-  it('indexes every Codex cache version with parent links and keeps unconfigured marketplace state unknown', async () => {
+  it('indexes every Codex cache version with parent links and keeps unconfigured cache state unknown', async () => {
     const before = await fileTreeDigests(home);
     const report = await scan('codex');
     assertChildren(report.bindings, ['cached-review-1.0.0', 'cached-review-2.0.0', 'cached-docs', 'unconfigured-review']);

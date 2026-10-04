@@ -44,14 +44,13 @@ test('shows client evidence and keeps native validation separate from permission
     await codex.getByRole('button', { name: /检查.*版本/ }).click();
     await expect(codex.getByText('0.159.2', { exact: false }).first()).toBeVisible();
     await codex.locator('summary').click();
-    await expect(codex.getByText(/运行时.*未验证/).first()).toBeVisible();
     await codex.locator('summary').click();
     const response = await page.request.get(new URL('/api/v1/compatibility', startupUrl).href);
     const report = await response.json();
     const client = report.clients.find((row: { agentId: string; instanceId: string | null }) => row.agentId === 'codex' && row.instanceId);
     expect(client.status).toBe('verified-client');
     expect(client.capabilities.filter((item: { area: string; status: string; resourceKind: string }) => item.area === 'native-config' && item.status === 'verified' && item.resourceKind === 'mcp')).toHaveLength(1);
-    expect(client.capabilities.every((item: { writable: boolean }) => !item.writable)).toBe(true);
+    expect(client.capabilities.some((item: { area: string; writable: boolean }) => item.area === 'fixture-validation' && item.writable)).toBe(true);
     expect(report.clients.find((row: { agentId: string }) => row.agentId === 'zcode').status).toBe('configuration-only');
     await page.reload();
     await expect(page.getByRole('heading', { name: '资源管理', exact: true })).toBeVisible();

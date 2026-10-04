@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import { assessRuntimeEvidence, runtimeBindingFingerprint, type RuntimeEvidenceSnapshot } from '../packages/core/src/runtime.ts';
-import { ManagerService, type ManagerStore } from '../packages/core/src/index.ts';
 import type { Binding, Catalog } from '../packages/contracts/src/index.ts';
 
 const codexInstance: Catalog['instances'][number] = {
@@ -108,23 +107,4 @@ describe('runtime evidence assessment', () => {
     expect(assessRuntimeEvidence({ ...catalog, instances: [{ ...codexInstance, agentId: 'claude-code' }] }, now, evidenceFor(mcp)).observations[0]?.mcpConnection).toBe('not-checked');
   });
 
-  it('keeps the production provider optional and fails closed on provider errors', async () => {
-    const mcp = binding('mcp');
-    const catalog: Catalog = { instances: [codexInstance], projects: [], lastScanAt: null, bindings: [mcp] };
-    const store = { catalog: () => catalog } as ManagerStore;
-    const manager = new ManagerService({ store, adapters: [], homeDir: 'isolated', now: () => now });
-    expect((await manager.runtimeReport()).observations[0]?.mcpConnection).toBe('not-checked');
-    const injected = new ManagerService({
-      store, adapters: [], homeDir: 'isolated', now: () => now,
-      runtimeEvidenceProvider: { readCurrentEvidence: async () => evidenceFor(mcp) },
-    });
-    expect((await injected.runtimeReport()).observations[0]?.mcpConnection).toBe('connected');
-    const broken = new ManagerService({
-      store, adapters: [], homeDir: 'isolated', now: () => now,
-      runtimeEvidenceProvider: { readCurrentEvidence: async () => { throw new Error('PRIVATE_SESSION_CONTENT'); } },
-    });
-    const report = await broken.runtimeReport();
-    expect(report.observations[0]?.mcpConnection).toBe('not-checked');
-    expect(JSON.stringify(report)).not.toContain('PRIVATE_SESSION_CONTENT');
-  });
 });

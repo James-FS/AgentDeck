@@ -47,7 +47,6 @@ test('registers a writable Codex root, checks its version and previews/applies/r
     await expect(groupedRow.getByText('仅磁盘发现', { exact: true })).toBeVisible();
     await expect(groupedRow.getByText('分组路径：collection/grouped-browser', { exact: false })).toBeVisible();
     await expect(groupedRow.getByText('Browser fixture description.', { exact: false })).toBeVisible();
-    await expect(groupedRow.getByText('暂未检测', { exact: true })).toBeVisible();
     await groupedRow.locator('.resource-detail-link').click();
     await expect(page.getByRole('dialog').getByText('仅磁盘发现 · 客户端可见性未验证', { exact: true })).toBeVisible();
     await expect(page.getByRole('dialog').getByText('collection/grouped-browser', { exact: true })).toBeVisible();
@@ -61,7 +60,6 @@ test('registers a writable Codex root, checks its version and previews/applies/r
     await page.getByRole('button', { name: '登记实例', exact: true }).first().click();
     const registration = page.getByRole('dialog');
     await registration.getByPlaceholder(/^例如：/).fill(configRoot);
-    await registration.getByText('允许 Codex 配置修改（仅支持的单项资源）', { exact: true }).click();
     await expect(registration.getByRole('checkbox')).toBeChecked();
     await registration.getByRole('button', { name: '登记实例', exact: true }).click();
     await expect(registration).toBeHidden();
@@ -82,7 +80,7 @@ test('registers a writable Codex root, checks its version and previews/applies/r
       await page.getByRole('dialog').getByRole('button', { name: /Close|关闭/i }).first().click();
       await expect(page.getByRole('dialog')).toBeHidden();
       await row.getByRole('button', { name: '计划停用', exact: true }).click();
-      await expect(page.getByText('Codex 资源配置计划', { exact: true })).toBeVisible();
+      await expect(page.getByText('资源启停预览', { exact: true })).toBeVisible();
       await expect(page.getByRole('dialog').getByText(configPath, { exact: true })).toBeVisible();
       if (name === 'browser-plugin') await expect(page.getByRole('dialog').getByText('plugin-child', { exact: true })).toBeVisible();
       expect(await readFile(configPath)).toEqual(original);
@@ -90,8 +88,7 @@ test('registers a writable Codex root, checks its version and previews/applies/r
       await expect(page.getByText('操作结果：succeeded')).toBeVisible();
       await page.getByRole('button', { name: '关闭', exact: true }).click();
       await expect(page.getByRole('dialog')).toBeHidden();
-      await expect(row.getByText('已停用', { exact: true })).toBeVisible();
-      await expect(row.getByText('暂未检测', { exact: true })).toBeVisible();
+      await expect(row.getByText('已禁用', { exact: true })).toBeVisible();
       await mkdir('work/browser-proof', { recursive: true });
       await page.screenshot({ path: `work/browser-proof/basic-${name}.png`, fullPage: true });
       await page.getByRole('button', { name: /^操作记录/ }).click();

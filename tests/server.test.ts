@@ -81,8 +81,8 @@ describe('local API with actual network peers and isolated configuration', () =>
     expect(actual.status).toBe(200);
     expect(actual.body.instances).toHaveLength(4);
     expect(actual.body.bindings.length).toBeGreaterThan(5);
-    expect(actual.body.instances.every(item => !item.writable)).toBe(true);
-    expect(actual.body.bindings.every(item => !item.writable)).toBe(true);
+    expect(actual.body.instances.every(item => item.writable)).toBe(true);
+    expect(actual.body.bindings.filter(item => item.writable && item.toggleTarget).every(item => item.toggleTarget?.agentId === actual.body.instances.find(instance => instance.id === item.instanceId)!.agentId)).toBe(true);
     expect(await fileTreeDigests(home)).toEqual(before);
     expect(JSON.stringify(actual.body)).not.toContain('AGENTDECK_SECRET_SENTINEL');
   });
@@ -109,9 +109,9 @@ describe('local API with actual network peers and isolated configuration', () =>
     expect(new Set(catalog.instances.map(item => item.agentId)).size).toBe(4);
     expect(catalog.bindings.length).toBeGreaterThan(5);
     expect(JSON.stringify(catalog)).not.toContain('AGENTDECK_SECRET_SENTINEL');
-    expect(catalog.instances.every(item => !item.writable)).toBe(true);
+    expect(catalog.instances.every(item => item.writable)).toBe(true);
     const binding = catalog.bindings.find(item => item.kind === 'mcp' && item.name === 'docs')!;
-    expect((await call('POST', '/api/v1/plans', { bindingId: binding.id, enabled: false })).status).toBe(403);
+    expect((await call('POST', '/api/v1/plans', { bindingId: binding.id, enabled: false })).status).toBe(201);
   });
 
   it('keeps explicit instance registration when rediscovering the same root', async () => {
@@ -149,18 +149,14 @@ describe('local API with actual network peers and isolated configuration', () =>
     expect((rescanned.body as Catalog).bindings.some(item => item.name === 'project-review' && item.projectId === projectId)).toBe(true);
   });
 
-  it('reports missing client-session evidence without probing configured MCP servers', async () => {
-    const { binding } = await writableCodex();
+  it('removes the cancelled runtime endpoint while retaining configuration capability evidence', async () => {
+    await writableCodex();
     const before = await fileTreeDigests(home);
-    const response = await call<{ observations: Array<{ bindingId: string; configurationEnabled: boolean | null; mcpConnection: string; clientSessionId: string | null; observedAt: string | null; reason: string }> }>('GET', '/api/v1/runtime');
-    expect(response.status).toBe(200);
-    const observation = response.body.observations.find(item => item.bindingId === binding.id);
-    expect(observation?.configurationEnabled).toBe(binding.enabled);
-    expect(observation?.mcpConnection).toBe('not-checked');
-    expect(observation?.clientSessionId).toBeNull();
-    expect(observation?.observedAt).toBeNull();
-    expect(observation?.reason).toContain('现有会话');
-    expect(JSON.stringify(response.body)).not.toContain('AGENTDECK_SECRET_SENTINEL');
+    const response = await call('GET', '/api/v1/runtime');
+    expect(response.status).toBe(404);
+    expect(response.body.error.code).toBe('NOT_FOUND');
+    expect((await call('GET', '/api/v1/compatibility')).status).toBe(200);
+    expect((await call('GET', '/api/v1/catalog')).status).toBe(200);
     expect(await fileTreeDigests(home)).toEqual(before);
   });
 

@@ -111,15 +111,16 @@ describe('client compatibility evidence over authenticated HTTP', () => {
   it.each([
     { transport: 'http', fields: 'url = "https://example.invalid/mcp"' },
     { transport: 'unknown', fields: 'custom_transport = "experimental"' },
-  ])('keeps $transport MCP writes experimental and requires explicit opt-in', async ({ transport, fields }) => {
+  ])('defaults supported $transport MCP switches on and still respects explicit read-only registration', async ({ transport, fields }) => {
     const configPath = path.join(home, '.codex/config.toml');
     await writeFile(configPath, `# isolated experimental transport\n[mcp_servers.experimental]\n${fields}\nenabled = true # preserve\n`);
     const before = await readFile(configPath);
     const discovered = await call<Catalog>('POST', '/scans', { discover: true });
     const automatic = discovered.bindings.find(row => row.name === 'experimental')!;
     expect(automatic.mcpTransport).toBe(transport);
-    expect(automatic.writable).toBe(false);
-    await call('POST', '/plans', { bindingId: automatic.id, enabled: false }, 403);
+    expect(automatic.writable).toBe(true);
+    await call('POST', '/plans', { bindingId: automatic.id, enabled: false }, 201);
+    expect(await readFile(configPath)).toEqual(before);
     const instance = await register('codex', path.dirname(configPath), true);
     await call('POST', `/instances/${instance.id}/version-check`, {});
     const catalog = await call<Catalog>('POST', '/scans', { instanceId: instance.id });

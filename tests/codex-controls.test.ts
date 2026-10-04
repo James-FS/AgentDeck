@@ -87,12 +87,17 @@ describe('bounded Codex Skill and local plugin configuration controls', () => {
     expect(await fileTreeDigests(path.join(home, '.codex/plugins/cache'))).toEqual(cacheBefore);
   });
 
-  it('keeps auto discovery, unsupported versions, project, builtin and plugin children read-only', async () => {
+  it('keeps unverified versions, project, builtin and plugin children read-only despite default controls', async () => {
     const auto = await call<Catalog>('POST', '/scans', { discover: true });
-    expect(auto.bindings.every(row => !row.writable)).toBe(true);
+    const autoCodex = auto.instances.find(row => row.agentId === 'codex')!;
+    expect(auto.bindings.filter(row => row.instanceId === autoCodex.id && row.kind !== 'mcp').every(row => !row.writable)).toBe(true);
+    expect(auto.instances.find(row => row.agentId === 'codex')?.writable).toBe(true);
+    await call('POST', `/instances/${autoCodex.id}/version-check`, {});
+    const verifiedAuto = await call<Catalog>('POST', '/scans', { instanceId: autoCodex.id });
+    expect(verifiedAuto.bindings.find(row => row.instanceId === autoCodex.id && row.name === 'user-review')?.writable).toBe(true);
     version = '0.159.3';
     const { catalog } = await register();
-    expect(catalog.bindings.every(row => !row.writable)).toBe(true);
+    expect(catalog.bindings.filter(row => row.instanceId === autoCodex.id).every(row => !row.writable)).toBe(true);
     const skillRow = catalog.bindings.find(row => row.name === 'user-review')!;
     await call('POST', '/plans', { bindingId: skillRow.id, enabled: false }, 403);
     version = '0.159.2';
