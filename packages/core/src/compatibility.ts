@@ -120,7 +120,7 @@ export function buildCapabilityEvidence(args: {
       ...(nativeVerified ? { controlScope: 'standalone-user-mcp' as const } : basicControl ? { controlScope: basicControl } : {}),
       ...(nativeVerified ? { mcpTransport: 'stdio' as const } : {}),
       ...(nativeVerified || basicNativeVerified ? {
-        reference: basicNativeVerified ? 'tests/native-codex-controls.test.ts; docs/基础版使用与验收.md' : 'tests/native-codex.test.ts; docs/compatibility.json; docs/客户端兼容与原生验收.md',
+        reference: basicNativeVerified ? 'tests/native-codex-controls.test.ts' : 'tests/native-codex.test.ts',
         version: args.versionEvidence!.version, platform: args.versionEvidence!.platform,
       } : {}),
     }));
