@@ -38,7 +38,7 @@ function addMcpEntries(args: {
       origin: 'configuration', configurationSourcePath: args.file,
       configurationKey: args.configurationKey ? `${args.configurationKey}.${name}` : `mcpServers.${name}`,
       configurationEnabled: enabled, cacheState: 'unknown',
-      mcpTransport: mcpTransport(server),
+      mcpTransport: mcpTransport(server), mcpConfig: server,
       diagnostics: server ? [] : [`${args.label} entry is not a static object.`],
       readOnlyReason: 'Claude Code MCP 配置在本轮为只读。',
     }));
@@ -250,7 +250,7 @@ async function scanClaudePlugins(args: {
                   configurationKey: configuration.key,
                   configurationEnabled: configuration.enabled,
                 } : { configurationEnabled: null }),
-                mcpTransport: mcpTransport(rawServer),
+                mcpTransport: mcpTransport(rawServer), mcpConfig: object(rawServer),
                 cacheState: 'present',
                 diagnostics: [
                   ...(configuration?.enabled === false ? ['已由父插件配置停用。'] : []),
@@ -466,7 +466,7 @@ async function scanClaudeFilesystemPlugins(context: ScanContext, diagnostics: st
           sourcePath: mcpSource, projectId: null, nativeKey: `filesystem-plugin:${folder}.mcpServers.${serverName}`,
           parentId: parent.id, enabled: null, origin: 'filesystem', ...(version ? { pluginVersion: version } : {}),
           configurationEnabled: null, cacheState: 'unknown',
-          mcpTransport: mcpTransport(raw),
+          mcpTransport: mcpTransport(raw), mcpConfig: object(raw),
           diagnostics: [
             ...(explicitEnabled ? ['包内服务器标记不能确定父插件配置或运行状态。'] : []),
             'No exact name@marketplace configuration identity was available for this filesystem plugin.',

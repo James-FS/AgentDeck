@@ -86,7 +86,7 @@ function addConfiguredCodexPlugins(args: {
         context: args.context, kind: 'mcp', name: serverName, scope: args.scope, sourceKind: 'plugin',
         sourcePath: args.sourcePath, projectId: args.projectId,
         nativeKey: `${config.key}.mcp_servers.${serverName}`, parentId: parent.id,
-        enabled: state.enabled, origin: 'configuration', pluginId: identity,
+        enabled: state.enabled, mcpConfig: object(rawServer), origin: 'configuration', pluginId: identity,
         ...(parts ? { marketplace: parts.marketplace } : {}),
         configurationSourcePath: config.sourcePath, configurationKey: `${config.key}.mcp_servers.${serverName}`,
         configurationEnabled: config.enabled, cacheState: 'unknown',
@@ -239,7 +239,7 @@ async function scanCodexPluginCache(args: {
               sourcePath: mcpSource, projectId: null, nativeKey: `cache:${marketplace}/${directoryName}/${version}.mcpServers.${serverName}`,
               parentId: parent.id, enabled: state.enabled, origin: 'cache', pluginId: identity, pluginVersion: version, marketplace,
               ...(config ? { configurationSourcePath: config.sourcePath, configurationKey: config.key, configurationEnabled: config.enabled } : { configurationEnabled: null }),
-              mcpTransport: mcpTransport(rawServer),
+              mcpTransport: mcpTransport(rawServer), mcpConfig: object(rawServer),
               cacheState: 'present',
               diagnostics: state.diagnostics,
               readOnlyReason: '插件缓存附带的 MCP 不能独立修改。',
@@ -310,7 +310,7 @@ export const codexAdapter: AgentAdapter = {
             sourcePath: configPath, projectId: null, nativeKey: `mcp_servers.${serverName}`, enabled: state,
             origin: 'configuration', configurationSourcePath: configPath, configurationKey: `mcp_servers.${serverName}`,
             configurationEnabled: state,
-            mcpTransport: transport,
+            mcpTransport: transport, mcpConfig: server,
             writable,
             readOnlyReason: writable ? null : !writableInstance
               ? '此实例已设为只读。'
@@ -383,7 +383,7 @@ export const codexAdapter: AgentAdapter = {
                 sourcePath: projectConfigPath, projectId: project.id, nativeKey: `mcp_servers.${serverName}`, enabled,
                 origin: 'configuration', configurationSourcePath: projectConfigPath,
                 configurationKey: `mcp_servers.${serverName}`, configurationEnabled: enabled,
-                mcpTransport: mcpTransport(server),
+                mcpTransport: mcpTransport(server), mcpConfig: server,
                 diagnostics: notes, readOnlyReason: '项目级 Codex MCP 配置在本轮为只读。',
               }));
             }

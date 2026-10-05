@@ -7,7 +7,7 @@ import { api } from './api';
 import { useAppStore } from './store';
 import { diskOnly, inventoryAgent, inventoryCategory, inventoryScope, matchesClassification } from './classification';
 import { configurationState } from './configuration-state';
-import { resourceRows, publicResourceIdentity, publicGroupState, type ResourceRow } from './resource-tree';
+import { resourceRows, publicResourceIdentity, publicGroupState, mcpResourceIdentity, mcpGroupState, type ResourceRow } from './resource-tree';
 
 type Page = 'overview' | 'resources' | 'instances' | 'projects' | 'operations';
 type SkillBinding = Binding & { sourceLabel?: string };
@@ -31,7 +31,8 @@ const operationsError = ref('');
 const activePlan = ref<ChangePlan | null>(null);
 const selectedBinding = ref<Binding | null>(null);
 const selectedPublicMembers = ref<Binding[]>([]);
-const selectedConfigurationState = computed(() => selectedPublicMembers.value.length ? publicGroupState(selectedPublicMembers.value) : selectedBinding.value ? configurationState(selectedBinding.value) : null);
+const selectedMcpMembers = ref<Binding[]>([]);
+const selectedConfigurationState = computed(() => selectedMcpMembers.value.length ? mcpGroupState(selectedMcpMembers.value) : selectedPublicMembers.value.length ? publicGroupState(selectedPublicMembers.value) : selectedBinding.value ? configurationState(selectedBinding.value) : null);
 const versionCheckBusy = ref('');
 const appliedOperation = ref<Operation | null>(null);
 const restoreOf = ref<string | null>(null);
@@ -62,7 +63,7 @@ const stats = computed(() => ({
 const countedResources = computed(() => {
   const seen = new Set<string>();
   return scoped.value.filter(binding => {
-    const key = publicResourceIdentity(binding);
+    const key = mcpResourceIdentity(binding) ?? publicResourceIdentity(binding);
     if (!key) return true;
     if (seen.has(key)) return false;
     seen.add(key);
@@ -74,15 +75,17 @@ function matches(binding: Binding, includePluginChildren = false): boolean {
   if (configurationFilter.value.length && !configurationFilter.value.includes(configurationState(binding).tone)) return false;
   if (!matchesClassification(binding, scopeFilter.value, ownerAgentFilter.value, categoryFilter.value)) return false;
   const text = searchText.value.trim().toLocaleLowerCase();
-  if (text && !`${binding.classification?.projectName ?? ''} ${binding.classification?.evidencePath ?? ''} ${binding.name} ${binding.displayName ?? ''} ${binding.discoveryPath ?? ''} ${binding.description} ${binding.nativeKey} ${binding.sourcePath} ${binding.pluginId ?? ''} ${binding.pluginVersion ?? ''} ${binding.marketplace ?? ''}`.toLocaleLowerCase().includes(text)) return false;
+  if (text && !`${binding.mcpService?.location ?? ''} ${binding.classification?.projectName ?? ''} ${binding.classification?.evidencePath ?? ''} ${binding.name} ${binding.displayName ?? ''} ${binding.discoveryPath ?? ''} ${binding.description} ${binding.nativeKey} ${binding.sourcePath} ${binding.pluginId ?? ''} ${binding.pluginVersion ?? ''} ${binding.marketplace ?? ''}`.toLocaleLowerCase().includes(text)) return false;
   if (originFilter.value && originFilter.value !== 'all' && binding.origin !== originFilter.value) return false;
   if (sourceFilter.value.length && !sourceFilter.value.includes(binding.sourceKind)) return false;
   if (!includePluginChildren && kindFilter.value !== 'all' && binding.kind !== kindFilter.value) return false;
   return true;
 }
 const visible = computed(() => resourceRows(scoped.value, matches, expanded.value, kindFilter.value));
-function rowName(item: ResourceRow) { return item.versionRecord ? `${resourceName(item.binding)} · ${item.binding.origin === 'cache' ? `缓存 v${item.binding.pluginVersion ?? '未知'}` : '配置记录'}` : resourceName(item.binding); }
+function rowName(item: ResourceRow) { return item.mcpBinding ? `${resourceName(item.binding)} · ${discoveryAgent(item.binding)} · 配置绑定` : item.versionRecord ? `${resourceName(item.binding)} · ${item.binding.origin === 'cache' ? `缓存 v${item.binding.pluginVersion ?? '未知'}` : '配置记录'}` : resourceName(item.binding); }
 function rowDescription(item: ResourceRow) {
+  if (item.mcpGroup) return `同一 MCP 服务 · 关联 ${new Set(item.mcpGroup.members.map(discoveryAgent)).size} 个 Agent · ${item.mcpGroup.members.length} 条绑定 · ${item.mcpGroup.variants === null ? '配置差异待复核（请重扫）' : item.mcpGroup.variants > 1 ? `配置不同（${item.mcpGroup.variants} 组）` : '配置相同'} · 当前匹配 ${item.mcpGroup.matchingMembers.length} 条`;
+  if (item.mcpBinding) return `${discoveryAgent(item.binding)} · ${store.instances.find(i=>i.id===item.binding.instanceId)?.name ?? item.binding.instanceId} · ${item.binding.classification?.projectName ?? '不限定项目'} · ${item.binding.configurationSourcePath ?? item.binding.sourcePath}`;
   if (item.publicGroup) return `公共资源 · ${item.publicGroup.members.length} 条发现记录 · ${publicDisabledLabel(item.publicGroup.members)}`;
   if (item.group) return `${item.group.versions.length} 个缓存版本 · ${item.group.configurations} 条配置记录 · 当前使用版本未确定`;
   if (item.binding.discoveryOnly) return `分组路径：${item.binding.discoveryPath} · ${item.binding.description}`;
@@ -90,8 +93,12 @@ function rowDescription(item: ResourceRow) {
   return item.binding.description || item.binding.nativeKey || item.binding.sourcePath;
 }
 function openRow(item: ResourceRow) {
-  if (item.group) togglePlugin(item.key);
+  if (item.group || item.mcpGroup) togglePlugin(item.key);
   else { openBinding(item.binding); selectedPublicMembers.value = item.publicGroup?.members ?? []; }
+}
+function openMcpGroup(item: ResourceRow) { openBinding(item.binding); selectedMcpMembers.value = item.mcpGroup?.members ?? []; }
+function groupValues(item: ResourceRow, label: (binding: Binding) => string) {
+  return [...new Set((item.mcpGroup?.matchingMembers ?? [item.binding]).map(label))].join('、');
 }
 function discoveryAgent(binding: Binding) { return agentName(store.instances.find(i => i.id === binding.instanceId)?.agentId ?? binding.classification?.discoveredByAgentId ?? 'unknown'); }
 function publicDisabledLabel(members: Binding[]) {
@@ -124,6 +131,7 @@ async function toggleBinding(binding: Binding, enabled: boolean) {
   finally { actionBusy.value = false; }
 }
 function refreshSelectedResource() {
+  selectedMcpMembers.value = selectedMcpMembers.value.flatMap(b => store.bindings.find(current => current.id === b.id) ?? []);
   selectedPublicMembers.value = selectedPublicMembers.value.flatMap(b => store.bindings.find(current => current.id === b.id) ?? []);
   if (selectedBinding.value) selectedBinding.value = store.bindings.find(b => b.id === selectedBinding.value?.id) ?? null;
 }
@@ -236,7 +244,7 @@ async function copyHash(value: string | null | undefined) {
 function togglePlugin(id: string) { const next = new Set(expanded.value); next.has(id) ? next.delete(id) : next.add(id); expanded.value = next; }
 function openInstanceForm() { instanceForm.agentId = store.adapters[0]?.id ?? ''; instanceForm.name = ''; instanceForm.configRoot = ''; instanceForm.writable = true; drawer.value = 'instance'; }
 function openProjectForm() { projectForm.name = ''; projectForm.rootPath = ''; drawer.value = 'project'; }
-function openBinding(binding: Binding) { selectedPublicMembers.value = []; selectedBinding.value = binding; drawer.value = 'binding'; }
+function openBinding(binding: Binding) { selectedMcpMembers.value = []; selectedPublicMembers.value = []; selectedBinding.value = binding; drawer.value = 'binding'; }
 function drawerVisibility(value: boolean) { if (!value) drawer.value = null; }
 async function refresh() { try { await store.refresh(); } catch { /* the store keeps the connection error visible */ } }
 async function saveInstance() {
@@ -449,28 +457,30 @@ function onGlobalKeydown(event: KeyboardEvent) {
             <div v-if="activeFilterChips.length" class="active-filters" aria-label="已选筛选条件"><span class="active-filters-label">已选筛选</span><button v-for="chip in activeFilterChips" :key="chip.group + ':' + chip.value" class="filter-chip" :title="'移除条件：' + chip.label" @click="removeFilterChip(chip.group, chip.value)">{{ chip.label }}<el-icon><Close /></el-icon></button><button class="filter-chip clear-all" @click="clearFilters">清除全部</button></div>
             <div class="taxonomy-note"><el-icon><InfoFilled /></el-icon>资源归类区分用户来源与 Agent 全局/项目资源；未配置缓存可确定存放归属，使用范围仍未知。归属不表示内容专用或已加载。</div>
             <div v-if="visible.length" class="table-scroll"><table class="resource-table"><thead><tr><th scope="col">扩展资源</th><th scope="col">资源归类</th><th scope="col">范围</th><th scope="col">所属 Agent</th><th scope="col">来源</th><th scope="col">配置状态</th><th scope="col">启停</th><th scope="col"><span class="visually-hidden">诊断</span></th></tr></thead><tbody>
-              <tr v-for="item in visible" :key="item.key" :class="{child:item.depth>0,parent:item.binding.kind==='plugin','plugin-group':!!item.group,'public-group':!!item.publicGroup}" @click="openRow(item)"><td>
+              <tr v-for="item in visible" :key="item.key" :class="{child:item.depth>0,parent:item.binding.kind==='plugin','plugin-group':!!item.group,'public-group':!!item.publicGroup,'mcp-group':!!item.mcpGroup}" @click="openRow(item)"><td>
                 <div class="resource-cell" :style="{paddingLeft:`${item.depth*24}px`}">
-                  <button v-if="item.group || item.binding.kind==='plugin'&&item.children" class="tree-toggle" :class="{expanded:expanded.has(item.key)}" :aria-expanded="expanded.has(item.key)" :aria-label="item.group ? expanded.has(item.key)?'收起插件版本':'展开插件版本':expanded.has(item.key)?'收起插件组件':'展开插件组件'" @click.stop="togglePlugin(item.key)"><el-icon><ArrowRight/></el-icon></button>
+                  <button v-if="item.mcpGroup || item.group || item.binding.kind==='plugin'&&item.children" class="tree-toggle" :class="{expanded:expanded.has(item.key)}" :aria-expanded="expanded.has(item.key)" :aria-label="item.mcpGroup ? expanded.has(item.key)?'收起 MCP 绑定':'展开 MCP 绑定' : item.group ? expanded.has(item.key)?'收起插件版本':'展开插件版本':expanded.has(item.key)?'收起插件组件':'展开插件组件'" @click.stop="togglePlugin(item.key)"><el-icon><ArrowRight/></el-icon></button>
                   <span v-else-if="item.depth" class="tree-stem"></span><i class="kind-icon" :class="item.binding.kind"><el-icon><component :is="item.binding.kind==='skill'?Document:item.binding.kind==='plugin'?Box:Connection"/></el-icon></i>
                   <div class="resource-copy"><div class="resource-title"><button class="resource-detail-link" :title="rowName(item)" :aria-label="rowName(item)" @click.stop="openRow(item)">{{ resourceName(item.binding) }}</button>
-                    <span v-if="item.publicGroup" class="version-badge">公共资源</span><span v-else-if="item.group" class="version-badge">版本分组</span>
+                    <span v-if="item.mcpGroup" class="version-badge">服务分组</span><span v-else-if="item.publicGroup" class="version-badge">公共资源</span><span v-else-if="item.group" class="version-badge">版本分组</span>
+                    <button v-if="item.mcpGroup" class="plan-link" :aria-label="`${resourceName(item.binding)}服务详情`" @click.stop="openMcpGroup(item)">服务详情</button>
                     <span v-else-if="item.binding.pluginVersion && item.binding.origin==='cache'" class="version-badge">缓存版本 v{{ item.binding.pluginVersion }}</span>
                     <span v-if="!item.group && (item.publicGroup ? item.publicGroup.members.every(diskOnly) : diskOnly(item.binding))" class="inventory-badge">仅磁盘发现</span>
                   </div><small :title="rowDescription(item)">{{ rowDescription(item) }}</small></div>
-                  <small v-if="item.group || item.binding.kind==='plugin'&&item.children" class="child-count">{{ item.children }} {{ item.group?'条记录':'项' }}</small>
+                  <small v-if="item.mcpGroup || item.group || item.binding.kind==='plugin'&&item.children" class="child-count">{{ item.children }} {{ item.mcpGroup?'条绑定':item.group?'条记录':'项' }}</small>
                 </div>
               </td>
-                <td class="classification-cell"><strong class="resource-category">{{ categoryLabel(inventoryCategory(item.binding)) }}</strong><code :title="item.group ? item.binding.pluginId : item.binding.sourcePath">{{ item.group ? item.binding.pluginId : item.binding.sourcePath }}</code><small :title="item.binding.classification?.reason">{{ item.group ? '展开查看各记录的原文路径与分类依据' : item.binding.classification?.reason ?? '旧索引无分类证据，请重新扫描' }}</small></td>
-                <td class="scope-cell"><span class="tag scope" :title="item.binding.classification?.reason">{{ scopeLabel(inventoryScope(item.binding)) }}</span><small v-if="item.binding.classification?.projectName" :title="item.binding.classification.projectName">{{ item.binding.classification.projectName }}</small><small v-else-if="inventoryScope(item.binding)==='user-global'">不限定项目</small></td>
-                <td class="agent-cell"><span>{{ inventoryAgent(item.binding)==='unknown'?'归属未知':agentName(inventoryAgent(item.binding)) }}</span><small v-if="item.binding.classification?.sharedSource" :title="item.binding.classification.sharedSource.agentIds.map(agentName).join('、')">共享来源 · {{ item.binding.classification.sharedSource.agentIds.map(agentName).join('、') }}</small></td>
-                <td><span v-if="item.group">配置 / 缓存汇总</span><span v-else-if="item.binding.kind==='skill'" class="tag source">{{ (item.binding as SkillBinding).sourceLabel ?? sourceLabel(item.binding.sourceKind) }}</span><span v-else>{{ sourceLabel(item.binding.sourceKind) }}</span><small v-if="!item.group && originLabel(item.binding)" class="origin-detail">{{ originLabel(item.binding) }}</small></td>
-                <td><span class="config-state" :class="(item.publicGroup?.state ?? item.group?.state ?? configurationState(item.binding)).tone" :title="(item.publicGroup?.state ?? item.group?.state ?? configurationState(item.binding)).reason"><i></i>{{ (item.publicGroup?.state ?? item.group?.state ?? configurationState(item.binding)).label }}</span></td>
+                <td class="classification-cell"><strong class="resource-category">{{ groupValues(item, b=>categoryLabel(inventoryCategory(b))) }}</strong><code :title="item.binding.mcpService?.location ?? item.binding.sourcePath">{{ item.mcpGroup ? item.binding.mcpService?.location : item.group ? item.binding.pluginId : item.binding.sourcePath }}</code><small>{{ item.mcpGroup ? '服务来源相同；配置归类保留在各绑定中' : item.group ? '展开查看各记录的原文路径与分类依据' : item.binding.classification?.reason ?? '旧索引无分类证据，请重新扫描' }}</small></td>
+                <td class="scope-cell"><span class="tag scope">{{ groupValues(item,b=>scopeLabel(inventoryScope(b))) }}</span><small v-if="item.mcpGroup">{{ groupValues(item,b=>b.classification?.projectName ?? (b.projectId ? '项目未确定' : '不限定项目')) }}</small><small v-else-if="item.binding.classification?.projectName">{{ item.binding.classification.projectName }}</small><small v-else-if="inventoryScope(item.binding)==='user-global'">不限定项目</small></td>
+                <td class="agent-cell"><span>{{ groupValues(item,b=>inventoryAgent(b)==='unknown'?'归属未知':agentName(inventoryAgent(b))) }}</span><small v-if="item.mcpGroup">各 Agent 配置分别保留</small><small v-else-if="item.binding.classification?.sharedSource" :title="item.binding.classification.sharedSource.agentIds.map(agentName).join('、')">共享来源 · {{ item.binding.classification.sharedSource.agentIds.map(agentName).join('、') }}</small></td>
+                <td><span v-if="item.mcpGroup">{{ groupValues(item,b=>sourceLabel(b.sourceKind)) }}</span><span v-else-if="item.group">配置 / 缓存汇总</span><span v-else-if="item.binding.kind==='skill'" class="tag source">{{ (item.binding as SkillBinding).sourceLabel ?? sourceLabel(item.binding.sourceKind) }}</span><span v-else>{{ sourceLabel(item.binding.sourceKind) }}</span><small v-if="!item.group && !item.mcpGroup && originLabel(item.binding)" class="origin-detail">{{ originLabel(item.binding) }}</small></td>
+                <td><span class="config-state" :class="(item.mcpGroup?.state ?? item.publicGroup?.state ?? item.group?.state ?? configurationState(item.binding)).tone" :title="(item.mcpGroup?.state ?? item.publicGroup?.state ?? item.group?.state ?? configurationState(item.binding)).reason"><i></i>{{ (item.mcpGroup?.state ?? item.publicGroup?.state ?? item.group?.state ?? configurationState(item.binding)).label }}</span></td>
                 <td>
-                  <template v-if="!item.publicGroup && canPlan(item.binding)">
+                  <template v-if="!item.mcpGroup && !item.publicGroup && canPlan(item.binding)">
                     <el-switch :model-value="item.binding.enabled===true" :disabled="actionBusy" :loading="actionBusy" :aria-label="`${resourceName(item.binding)}启停`" @click.stop @change="toggleBinding(item.binding,Boolean($event))"/>
                     <el-tooltip content="查看启停预览"><button class="plan-link" :disabled="actionBusy" :aria-label="item.binding.enabled===true?'计划停用':item.binding.enabled===false?'计划启用':'生成启用计划'" @click.stop="planToggle(item.binding,item.binding.enabled!==true)"><el-icon><InfoFilled/></el-icon></button></el-tooltip>
                   </template>
+                  <button v-else-if="item.mcpGroup" class="plan-link" @click.stop="togglePlugin(item.key)">展开各绑定启停</button>
                   <el-tooltip v-else :content="readOnlyReason(item.binding)"><span class="readonly"><i class="cap-dot"></i><el-icon><Setting/></el-icon>只读</span></el-tooltip>
                 </td>
                 <td><el-tooltip v-if="item.binding.diagnostics.length" :content="item.binding.diagnostics.join('；')"><el-icon class="notice"><InfoFilled/></el-icon></el-tooltip></td></tr>
@@ -521,7 +531,24 @@ function onGlobalKeydown(event: KeyboardEvent) {
             <code v-if="binding.configurationKey">{{ binding.configurationKey }}</code>
           </div>
         </div>
-        <div class="detail-grid">
+        <div v-if="selectedMcpMembers.length" class="mcp-agent-bindings public-agent-states">
+          <p>同一服务的配置绑定分别保留。下方开关只修改所选绑定，不批量控制其他 Agent；同一入口不证明共用运行进程。</p>
+          <small>共同服务来源</small><code>{{ selectedBinding.mcpService?.location }}</code>
+          <p>{{ selectedBinding.mcpService?.reason }}</p>
+          <div v-for="binding in selectedMcpMembers" :key="binding.id" class="plan-path">
+            <button class="resource-detail-link" :aria-label="`${discoveryAgent(binding)}MCP绑定详情`" @click="openBinding(binding)">{{ discoveryAgent(binding) }} · {{ store.instances.find(i=>i.id===binding.instanceId)?.name ?? binding.instanceId }} · {{ binding.classification?.projectName ?? '不限定项目' }}</button>
+            <b>{{ bindingCategoryLabel(binding) }} · {{ scopeLabel(inventoryScope(binding)) }}</b>
+            <span class="config-state" :class="configurationState(binding).tone">{{ configurationState(binding).label }}</span>
+            <el-switch v-if="canPlan(binding)" :model-value="binding.enabled===true" :disabled="actionBusy" :aria-label="`${discoveryAgent(binding)}MCP绑定启停`" @change="toggleBinding(binding,Boolean($event))"/>
+            <small v-else>{{ readOnlyReason(binding) }}</small>
+            <code>{{ binding.configurationSourcePath ?? binding.sourcePath }}</code><code>{{ binding.configurationKey ?? binding.nativeKey }}</code>
+            <small>{{ binding.classification?.reason }}</small>
+            <small v-if="binding.mcpService?.kind==='package'">{{ binding.mcpService.packageName }} · 版本：{{ binding.mcpService.packageVersion ?? '未确定' }} · {{ binding.mcpService.launchMode }}</small>
+            <code v-if="binding.mcpService?.packageEvidencePath">{{ binding.mcpService.packageEvidencePath }}</code>
+            <code v-if="binding.mcpService?.entryPath">{{ binding.mcpService.entryPath }}</code>
+          </div>
+        </div>
+        <div v-if="!selectedMcpMembers.length" class="detail-grid">
           <div><small>所属 Agent</small><b>{{ inventoryAgent(selectedBinding)==='unknown'?'归属未知':agentName(inventoryAgent(selectedBinding)) }}</b></div>
           <div><small>配置状态</small><b class="config-state" :class="selectedConfigurationState?.tone">{{ selectedConfigurationState?.label }}</b></div>
           <div class="wide"><small>配置状态依据与限制</small><b>{{ selectedConfigurationState?.reason }}</b></div>
@@ -538,6 +565,9 @@ function onGlobalKeydown(event: KeyboardEvent) {
           <div v-if="selectedBinding.kind==='mcp'"><small>MCP 传输</small><b>{{ selectedBinding.mcpTransport==='stdio'?'STDIO':selectedBinding.mcpTransport==='http'?'HTTP':'未知；不适用已验证的原生 STDIO 案例' }}</b></div>
           <div v-if="selectedBinding.discoveryOnly"><small>发现级别</small><b>仅磁盘发现 · 客户端可见性未验证</b></div><div v-if="selectedBinding.discoveryPath" class="wide"><small>分组路径</small><code>{{ selectedBinding.discoveryPath }}</code></div><div class="wide"><small>来源路径</small><code>{{ selectedBinding.sourcePath||'服务未提供路径' }}</code></div>
           <div class="wide"><small>原生配置键</small><code>{{ selectedBinding.nativeKey||'服务未提供键名' }}</code></div>
+          <div v-if="selectedBinding.mcpService" class="wide"><small>MCP 服务来源证据</small><code>{{ selectedBinding.mcpService.location }}</code><b>{{ selectedBinding.mcpService.reason }}</b><code>{{ selectedBinding.mcpService.evidencePath }}</code></div>
+          <div v-if="selectedBinding.mcpService?.kind==='package'" class="wide"><small>MCP 包与启动方式</small><b>{{ selectedBinding.mcpService.packageName }} · 版本：{{ selectedBinding.mcpService.packageVersion ?? '未确定' }} · {{ selectedBinding.mcpService.launchMode }}</b><code>{{ selectedBinding.mcpService.packageEvidencePath }}</code><code>{{ selectedBinding.mcpService.entryPath }}</code></div>
+          <div v-else-if="selectedBinding.kind==='mcp'" class="wide"><small>MCP 服务来源证据</small><b>未确定或旧索引缺少证据；重新扫描后核对。不会仅凭名称或配置目录合并。</b></div>
           <div v-if="selectedBinding.builtinSourcePath" class="wide"><small>Agent 内置来源证据</small><code>{{ selectedBinding.builtinSourcePath }}</code><p>客户端随包资源证明来源；启用状态单独依据配置，不证明当前会话加载。</p></div>
           <div v-if="selectedBinding.pluginId" class="wide"><small>完整插件身份</small><code>{{ selectedBinding.pluginId }}</code></div>
           <div v-if="selectedBinding.pluginVersion" class="wide"><small>缓存版本</small><b>{{ selectedBinding.pluginVersion }}<template v-if="selectedBinding.marketplace"> · {{ selectedBinding.marketplace }}</template></b></div>

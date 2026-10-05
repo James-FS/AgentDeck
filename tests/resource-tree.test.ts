@@ -8,6 +8,40 @@ function binding(id: string, extra: Partial<Binding> = {}): Binding {
     pluginId: 'computer-use@official', pluginVersion: id, pluginIdentityVerified: true, origin: 'cache', ...extra };
 }
 const all = () => true;
+
+function mcp(id: string, extra: Partial<Binding> = {}): Binding {
+  return binding(id, { kind:'mcp', pluginId:undefined, origin:'configuration',
+    mcpService:{identity:'same-entry',kind:'local-entry',location:'D:/services/server.mjs',configurationIdentity:'scan:same',evidencePath:id,reason:'literal path'},...extra });
+}
+describe('MCP service presentation groups', () => {
+  it('folds same entry across Agents/projects, retains all original bindings and independent targets', () => {
+    const values = [mcp('codex',{instanceId:'codex',writable:true}),mcp('zcode',{instanceId:'zcode',enabled:false}),mcp('project',{projectId:'p',scope:'project',instanceId:'claude'})];
+    const before = JSON.stringify(values);
+    const rows = resourceRows(values,all,new Set(),'mcp');
+    expect(rows).toHaveLength(1); expect(rows[0]!.mcpGroup?.members).toEqual(values);
+    expect(rows[0]!.mcpGroup?.state.label).toBe('未确定');
+    const expanded = resourceRows(values,all,new Set([rows[0]!.key]),'mcp');
+    expect(expanded.filter(b=>b.mcpBinding).map(row=>row.binding.id)).toEqual(['codex','zcode','project']);
+    expect(expanded[1]!.binding.writable).toBe(true); expect(JSON.stringify(values)).toBe(before);
+  });
+  it('requires service evidence rather than names/config directories and leaves plugin children attached', () => {
+    const other = mcp('other'); other.mcpService!.identity = 'different-entry';
+    const values=[mcp('a'),mcp('b'),other,mcp('unknown',{mcpService:undefined}),mcp('child',{parentId:'parent'}),binding('parent')];
+    expect(resourceRows(values,all,new Set(),'all')).toHaveLength(4);
+  });
+  it('filters by real binding, summarizes matching states and flags private configuration differences', () => {
+    const first=mcp('first',{enabled:true}); const second=mcp('second',{enabled:false}); second.mcpService!.configurationIdentity='scan:different';
+    const rows=resourceRows([first,second],b=>b.enabled===false,new Set(),'mcp');
+    expect(rows).toHaveLength(1); expect(rows[0]!.mcpGroup?.members).toHaveLength(2);
+    expect(rows[0]!.mcpGroup?.matchingMembers).toEqual([second]); expect(rows[0]!.mcpGroup?.state.label).toBe('已禁用');
+    expect(rows[0]!.mcpGroup?.variants).toBe(2);
+    expect(resourceRows([first,second],()=>false,new Set(),'mcp')).toHaveLength(0);
+  });
+  it('does not claim config difference when old indexes come from a different comparison session', () => {
+    const first=mcp('old'), second=mcp('new'); second.mcpService!.configurationIdentity='new-scan:digest';
+    expect(resourceRows([first,second],all,new Set(),'mcp')[0]!.mcpGroup?.variants).toBeNull();
+  });
+});
 describe('plugin cache presentation groups', () => {
   it('collapses configuration and versions while preserving every real row and operation target on expansion', () => {
     const values = [binding('config', { origin: 'configuration', pluginVersion: undefined }), binding('v1', { writable: true }), binding('v2'),

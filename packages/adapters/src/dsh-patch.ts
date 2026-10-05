@@ -72,3 +72,19 @@ export function parseStaticPatchRows(sourceText: string): unknown[] | null {
   if (!isSeq(document.contents)) return null;
   return rowSequence(document.contents);
 }
+
+/** Static connection values only. Tags and aliases never resolve or execute. */
+export function staticMcpConfig(node: unknown): Record<string, unknown> | null {
+  function value(item: unknown, depth: number): unknown {
+    if (depth > 12 || isAlias(item)) throw new Error('unknown');
+    if (isScalar(item) && !isDynamic(item)) return scalar(item);
+    if (isSeq(item) && item.items.length <= 200) return item.items.map(child => value(child, depth + 1));
+    if (isMap(item) && item.items.length <= 200) return Object.fromEntries(item.items.map(pair => {
+      const key = staticString(pair.key);
+      if (!key) throw new Error('unknown');
+      return [key, value(pair.value, depth + 1)];
+    }));
+    throw new Error('unknown');
+  }
+  try { return isMap(node) ? value(node, 0) as Record<string, unknown> : null; } catch { return null; }
+}

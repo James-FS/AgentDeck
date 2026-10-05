@@ -5,7 +5,7 @@ import {
   baseBinding, boundedRead, boundedText, directEntries, existsRegularFile,
   isSafePathWithin, object, safeMcpFile, scanSkillRoot,
 } from './shared.js';
-import { isDynamic, mapValue, parseStaticPatchRows, staticBoolean, staticString } from './dsh-patch.js';
+import { isDynamic, mapValue, parseStaticPatchRows, staticBoolean, staticString, staticMcpConfig } from './dsh-patch.js';
 
 /** Installation metadata only. Never executes DeepSeek Harness or imports bundled code. */
 
@@ -150,6 +150,7 @@ export async function scanDshBuiltins(context: ScanContext, bindings: Binding[],
             if (!serverName) continue;
             const transport = staticString(mapValue(config, 'transport'));
             const child = baseBinding({ context, kind: 'mcp', name: serverName, scope: 'native', sourceKind: 'builtin',
+              mcpConfig: staticMcpConfig(config),
               projectId: null, parentId: parent.id, sourcePath: file, nativeKey: `${parent.nativeKey}.config.serverName`, origin: 'filesystem',
               mcpTransport: transport === 'stdio' ? 'stdio' : ['http', 'sse', 'streamable-http'].includes(transport ?? '') ? 'http' : 'unknown',
               ...(parent.classification?.location ? { location: { ...parent.classification.location } } : {}),

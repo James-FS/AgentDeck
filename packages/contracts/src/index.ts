@@ -174,6 +174,10 @@ export interface Binding {
   cacheState?: 'present' | 'missing' | 'unknown';
   mcpTransport?: 'stdio' | 'http' | 'unknown';
   controlScope?: CapabilityControlScope;
+  /** Scanner evidence of a referenced service, separate from configuration scope/ownership. */
+  mcpService?: { identity: string; kind: 'local-entry' | 'endpoint' | 'package'; location: string;
+    packageName?: string; packageVersion?: string | null; launchMode?: string; packageEvidencePath?: string; entryPath?: string;
+    configurationIdentity: string; evidencePath: string; reason: string };
 }
 
 export interface Catalog {

@@ -21,7 +21,7 @@ function addServers(context: ScanContext, file: string, config: unknown, source:
       context, kind: 'mcp', name, scope: source === 'repository' ? 'project' : 'native',
       sourceKind: source, projectId: source === 'repository' ? context.project?.id ?? null : null,
       sourcePath: file, nativeKey: `mcp.servers.${name}`,
-      enabled, mcpTransport: mcpTransport(server),
+      enabled, mcpTransport: mcpTransport(server), mcpConfig: server,
       origin: 'configuration', configurationSourcePath: file, configurationKey: `mcp.servers.${name}`,
       configurationEnabled: enabled, cacheState: 'unknown',
       diagnostics: server ? [] : ['MCP 服务器条目不是静态对象。'],
@@ -77,7 +77,7 @@ async function scanFallbackMcp(context: ScanContext, home: string, source: 'user
     const flag = server && Object.hasOwn(server, 'enable') ? server.enable : server?.enabled;
     const enabled = !server ? null : flag === undefined ? true : typeof flag === 'boolean' ? flag : null;
     bindings.push(baseBinding({ context, kind: 'mcp', name, scope: projectId ? 'project' : 'user-global', sourceKind: source,
-      projectId, sourcePath: file, nativeKey: `mcpServers.${name}`, enabled, mcpTransport: mcpTransport(raw), origin: 'configuration',
+      projectId, sourcePath: file, nativeKey: `mcpServers.${name}`, enabled, mcpTransport: mcpTransport(raw), mcpConfig: server, origin: 'configuration',
       configurationSourcePath: file, configurationKey: `mcpServers.${name}`, configurationEnabled: enabled,
       location: { category: projectId ? 'project' : 'user-global', rootPath: path.dirname(file), evidencePath: file,
         reason: '公共 .agents/mcp.json 来源；ZCode 同范围无原生 MCP 声明时的静态回退证据，不代表其他客户端加载。' },

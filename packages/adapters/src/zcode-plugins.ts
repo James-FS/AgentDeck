@@ -90,7 +90,7 @@ export async function scanZCodePlugins(context: ScanContext, configuration: Bind
       const enabled = parent.enabled === false ? false : parent.enabled === true && server ? flag === undefined ? true : typeof flag === 'boolean' ? flag : null : null;
       bindings.push(baseBinding({ ...metadata, kind: 'mcp', name: serverName, scope: 'native', sourceKind: 'plugin', projectId: null,
         sourcePath: file, nativeKey: `plugin:${identity ?? folder}.mcpServers.${serverName}`,
-        enabled, mcpTransport: mcpTransport(raw), cacheState: 'present',
+        enabled, mcpTransport: mcpTransport(raw), mcpConfig: server, cacheState: 'present',
         diagnostics: server ? [] : ['ZCode 插件 MCP 声明不是静态对象。'], readOnlyReason: 'ZCode 插件 MCP 随父插件配置，只读且不执行。' }));
     }
   }

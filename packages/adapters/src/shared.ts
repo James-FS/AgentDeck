@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
 import { lstat, readFile, readdir, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { mcpServiceEvidence } from './mcp-service.js';
+
+// Raw connection settings stay in memory only, never in the catalog or storage DTO.
+const mcpDeclarations = new WeakMap<Binding, Record<string, unknown>>();
 import { parse as parseJsonc, type ParseError } from 'jsonc-parser';
 import { isMap, isScalar, parseDocument } from 'yaml';
 import type {
@@ -189,6 +193,7 @@ export function baseBinding(args: {
   configurationEnabled?: boolean | null;
   cacheState?: Binding['cacheState'];
   mcpTransport?: Binding['mcpTransport'];
+  mcpConfig?: Record<string, unknown> | null;
   location?: NonNullable<Binding['classification']>['location'];
   pluginIdentityVerified?: boolean;
 }): Binding {
@@ -199,7 +204,7 @@ export function baseBinding(args: {
   const knownProject = projectId !== null && projectId === args.context.project?.id;
   const inventoryScope = knownProject ? 'project' : projectId !== null ? 'unknown'
     : args.scope === 'user-global' || configured ? 'user-global' : 'unknown';
-  return {
+  const binding: Binding = {
     classification: {
       category: args.location?.category ?? (knownProject ? 'agent-project'
         : isWithin(args.context.instance.configRoot, sourcePath) || configured ? 'agent-global' : 'unknown'),
@@ -258,6 +263,8 @@ export function baseBinding(args: {
     ...(args.cacheState === undefined ? {} : { cacheState: args.cacheState }),
     ...(args.mcpTransport === undefined ? {} : { mcpTransport: args.mcpTransport }),
   };
+  if (args.kind === 'mcp' && args.mcpConfig) mcpDeclarations.set(binding, args.mcpConfig);
+  return binding;
 }
 
 export function isPublicGlobalResource(binding: Binding): boolean {
@@ -269,6 +276,11 @@ export async function report(bindings: Binding[], diagnostics: string[]): Promis
   attachProjectPluginComponents(bindings, diagnostics);
   const byId = new Map(bindings.map(binding => [binding.id, binding]));
   for (const binding of bindings) {
+    const declaration = mcpDeclarations.get(binding);
+    if (declaration) {
+      const evidence = await mcpServiceEvidence(declaration, binding.configurationSourcePath ?? binding.sourcePath);
+      if (evidence) binding.mcpService = evidence;
+    }
     if (binding.kind === 'skill' && !binding.configurationControl) {
       binding.configurationControl = binding.discoveryOnly
         ? { mode: 'unknown', reason: '仅磁盘发现，客户端是否识别该 Skill 和开关机制均未确定。' }
@@ -352,6 +364,8 @@ function attachProjectPluginComponents(bindings: Binding[], diagnostics: string[
           diagnostics: [...child.diagnostics.filter(note => !note.includes('父插件')),
             '项目配置精确引用插件身份；保留每个缓存版本，未确认客户端实际使用的版本。'],
         };
+        const declaration = mcpDeclarations.get(child);
+        if (declaration) mcpDeclarations.set(component, declaration);
         delete component.controlScope;
         delete component.configurationSourcePath;
         delete component.configurationKey;

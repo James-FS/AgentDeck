@@ -8,7 +8,17 @@ export interface PluginGroup {
   state: { label: string; tone: 'on' | 'off' | 'unknown'; reason: string };
 }
 export interface PublicGroup { members: Binding[]; state: PluginGroup['state'] }
-export interface ResourceRow { key: string; binding: Binding; depth: number; children: number; group?: PluginGroup; publicGroup?: PublicGroup; versionRecord?: boolean }
+export interface McpGroup { members: Binding[]; matchingMembers: Binding[]; variants: number | null; state: PluginGroup['state'] }
+export interface ResourceRow { key: string; binding: Binding; depth: number; children: number; group?: PluginGroup; publicGroup?: PublicGroup; mcpGroup?: McpGroup; mcpBinding?: boolean; versionRecord?: boolean }
+
+export function mcpResourceIdentity(binding: Binding): string | null {
+  return binding.kind === 'mcp' && binding.parentId === null && binding.mcpService?.identity ? binding.mcpService.identity : null;
+}
+export function mcpGroupState(members: Binding[]): PluginGroup['state'] {
+  const enabled = members.every(b => b.enabled === true) ? true : members.every(b => b.enabled === false) ? false : null;
+  return { label: enabled === true ? '已启用' : enabled === false ? '已禁用' : '未确定', tone: enabled === true ? 'on' : enabled === false ? 'off' : 'unknown',
+    reason: `汇总 ${members.length} 条匹配绑定的配置状态；不同或未知状态保留未确定，不表示共用进程。` };
+}
 
 /** Requires scanner-provided physical identity and explicit public user-directory evidence. */
 export function publicResourceIdentity(binding: Binding): string | null {
@@ -31,9 +41,12 @@ export function resourceRows(bindings: Binding[], matches: (binding: Binding, in
   for (const child of bindings) if (child.parentId) children.set(child.parentId, [...(children.get(child.parentId) ?? []), child]);
   const identities = new Map<string, Binding[]>();
   const publicIdentities = new Map<string, Binding[]>();
+  const mcpIdentities = new Map<string, Binding[]>();
   const identity = (b: Binding) => b.kind === 'plugin' && b.pluginId && (b.origin === 'configuration' || b.origin === 'cache' && b.pluginIdentityVerified === true)
     ? JSON.stringify([b.instanceId, b.projectId, b.pluginId]) : null;
   for (const root of roots) {
+    const mcpKey = mcpResourceIdentity(root);
+    if (mcpKey) mcpIdentities.set(mcpKey, [...(mcpIdentities.get(mcpKey) ?? []), root]);
     const publicKey = publicResourceIdentity(root);
     if (publicKey) publicIdentities.set(publicKey, [...(publicIdentities.get(publicKey) ?? []), root]);
     const key = identity(root);
@@ -44,6 +57,22 @@ export function resourceRows(bindings: Binding[], matches: (binding: Binding, in
   const matchingChildren = (b: Binding) => (children.get(b.id) ?? []).filter(child => matches(child, kind === 'plugin'));
   const relevant = (b: Binding) => matches(b) || b.kind === 'plugin' && matchingChildren(b).length > 0;
   for (const root of roots) {
+    const mcpId = mcpResourceIdentity(root);
+    const mcpMembers = mcpId ? mcpIdentities.get(mcpId)! : [];
+    if (mcpId && mcpMembers.length > 1) {
+      const key = `mcp-group:${mcpId}`;
+      if (visited.has(key)) continue;
+      visited.add(key);
+      const matching = mcpMembers.filter(relevant);
+      if (!matching.length) continue;
+      const tokens = mcpMembers.map(b => b.mcpService!.configurationIdentity);
+      const sessions = new Set(tokens.map(token => token.split(':')[0]));
+      const variants = sessions.size === 1 ? new Set(tokens).size : null;
+      output.push({ key, binding: matching[0]!, depth: 0, children: mcpMembers.length,
+        mcpGroup: { members: mcpMembers, matchingMembers: matching, variants, state: mcpGroupState(matching) } });
+      if (expanded.has(key)) for (const member of matching) output.push({ key: member.id, binding: member, depth: 1, children: 0, mcpBinding: true });
+      continue;
+    }
     const publicId = publicResourceIdentity(root);
     if (publicId) {
       const key = `public-group:${publicId}`;

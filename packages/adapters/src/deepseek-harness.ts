@@ -6,7 +6,7 @@ import {
   baseBinding, boundedText, directDirectories, directEntries, expandPath, existsDirectory,
   existsRegularFile, findExecutable, instance, isSafePathWithin, report, scanSkillRoot,
 } from './shared.js';
-import { CUSTOM_TAGS, mapValue, rowSequence, staticBoolean, staticString, type YNode } from './dsh-patch.js';
+import { CUSTOM_TAGS, mapValue, rowSequence, staticBoolean, staticString, staticMcpConfig, type YNode } from './dsh-patch.js';
 import { scanDshBuiltins } from './dsh-builtin.js';
 import { markDshToggleTarget } from './dsh-toggle.js';
 
@@ -75,6 +75,7 @@ async function scanProfilePatch(context: ScanContext, file: string, boundary: st
     bindings.push(baseBinding({
       context, kind: 'mcp', name: serverName, scope, sourceKind, projectId,
       sourcePath: file, nativeKey: `profiles.${profile}.plugins.${id}.config.serverName`, parentId: parent.id,
+      mcpConfig: staticMcpConfig(config),
       enabled: state,
       mcpTransport: ['stdio'].includes(staticString(mapValue(config, 'transport')) ?? '') ? 'stdio'
         : ['http', 'sse', 'streamable-http'].includes(staticString(mapValue(config, 'transport')) ?? '') ? 'http' : 'unknown',
