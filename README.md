@@ -78,7 +78,7 @@ The JSON API is under `/api/v1`. Useful routes are:
 - `POST /api/v1/instances` and `POST /api/v1/projects` — explicitly register a configuration root or project.
 - `POST /api/v1/scans` — scan registered instances, optionally discover instances or select a project.
 - `POST /api/v1/demo` — create or refresh the isolated example catalog.
-- `POST /api/v1/plans` — prepare a supported Codex or ZCode resource configuration toggle; the returned plan contains a redacted diff and digest.
+- `POST /api/v1/plans` — prepare a supported single-resource configuration toggle (Codex, ZCode, Claude Code, or DeepSeek Harness, within the documented support scope); the returned plan contains a redacted diff and digest.
 - `POST /api/v1/plans/:id/apply` — apply the reviewed plan using its `afterHash` as `digest`.
 - `GET /api/v1/operations` and `POST /api/v1/operations/:id/restore-plan` — inspect operations and prepare a restore plan.
 - `GET /api/v1/events` — authenticated SSE updates for catalog and operation changes.
