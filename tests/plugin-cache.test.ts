@@ -34,7 +34,6 @@ describe('plugin cache and project source integrity', () => {
         expect(child.projectId).toBe(parent?.projectId);
         expect(child.sourceKind).toBe('plugin');
         expect(child.writable).toBe(false);
-        expect(child.runtime).toBe('unknown');
       }
     }
   }
@@ -143,7 +142,6 @@ describe('plugin cache and project source integrity', () => {
     expect(missing?.kind).toBe('plugin');
     expect(missing?.cacheState).toBe('missing');
     expect(missing?.enabled).toBeNull();
-    expect(missing?.runtime).toBe('unknown');
     expect(missing?.writable).toBe(false);
   });
   it('keeps Codex project configuration separate from global sources and read-only', async () => {
@@ -196,7 +194,7 @@ describe('plugin cache and project source integrity', () => {
     expect(configured).toHaveLength(2);
     expect(configured.find(item => item.projectId === null)?.enabled).toBe(true);
     expect(configured.find(item => item.projectId === 'project-one')?.enabled).toBe(false);
-    expect(configured.every(item => item.origin === 'configuration' && item.runtime === 'unknown' && !item.writable)).toBe(true);
+    expect(configured.every(item => item.origin === 'configuration' && !item.writable)).toBe(true);
     expect(configured.find(item => item.projectId === 'project-one')?.sourcePath).toBe(projectFile);
     expect(report.bindings.find(item => item.pluginId === 'unknown-tools@fixture-market')?.enabled).toBeNull();
   });

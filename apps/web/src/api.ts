@@ -117,7 +117,6 @@ function validateCatalog(value: unknown): Catalog {
     && (entry.parentId === null || typeof entry.parentId === 'string')
     && typeof entry.sourcePath === 'string' && typeof entry.nativeKey === 'string'
     && (entry.enabled === null || typeof entry.enabled === 'boolean')
-    && ['unknown', 'pending', 'active', 'inactive'].includes(String(entry.runtime))
     && typeof entry.writable === 'boolean'
     && (entry.readOnlyReason === null || typeof entry.readOnlyReason === 'string')
     && (entry.origin === undefined || ['configuration', 'cache', 'filesystem'].includes(String(entry.origin)))
@@ -178,13 +177,13 @@ function validateVersionEvidence(value: unknown): value is ClientVersionEvidence
 
 function validateCapabilityEvidence(value: unknown): value is CapabilityEvidence {
   return isRecord(value)
-    && ['static-scan', 'fixture-validation', 'native-config', 'runtime'].includes(String(value.area))
+    && ['static-scan', 'fixture-validation', 'native-config'].includes(String(value.area))
     && (value.resourceKind === null || ['skill', 'plugin', 'mcp'].includes(String(value.resourceKind)))
     && (value.scope === null || ['user-global', 'project', 'project-directory', 'native'].includes(String(value.scope)))
     && (value.sourceKind === undefined || value.sourceKind === null || ['user', 'repository', 'plugin', 'builtin', 'organization', 'account-sync', 'unknown'].includes(String(value.sourceKind)))
     && (value.controlScope === undefined || ['standalone-user-mcp', 'user-config-skill', 'local-marketplace-plugin'].includes(String(value.controlScope)))
     && (value.mcpTransport === undefined || ['stdio', 'http', 'unknown'].includes(String(value.mcpTransport)))
-    && (value.operations === undefined || (Array.isArray(value.operations) && value.operations.every(operation => ['scan', 'toggle', 'restore', 'runtime-observation'].includes(String(operation)))) )
+    && (value.operations === undefined || (Array.isArray(value.operations) && value.operations.every(operation => ['scan', 'toggle', 'restore'].includes(String(operation)))) )
     && ['verified', 'partial', 'unverified', 'unsupported'].includes(String(value.status))
     && typeof value.readable === 'boolean' && typeof value.writable === 'boolean' && typeof value.reason === 'string'
     && (value.evidenceReference === undefined || typeof value.evidenceReference === 'string')

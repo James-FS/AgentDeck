@@ -4,7 +4,7 @@ import { resourceRows } from '../apps/web/src/resource-tree';
 
 function binding(id: string, extra: Partial<Binding> = {}): Binding {
   return { id, instanceId: 'zcode', projectId: null, name: 'computer-use', kind: 'plugin', scope: 'native', sourceKind: 'plugin', compatibilityClass: 'unknown',
-    parentId: null, sourcePath: `work/tests/${id}`, nativeKey: id, enabled: true, runtime: 'unknown', writable: false, readOnlyReason: 'readonly', diagnostics: [], updatedAt: '',
+    parentId: null, sourcePath: `work/tests/${id}`, nativeKey: id, enabled: true, writable: false, readOnlyReason: 'readonly', diagnostics: [], updatedAt: '',
     pluginId: 'computer-use@official', pluginVersion: id, pluginIdentityVerified: true, origin: 'cache', ...extra };
 }
 const all = () => true;

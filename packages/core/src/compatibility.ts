@@ -55,7 +55,7 @@ function evidence(args: {
     resourceKind: args.row.kind,
     scope: args.row.scope,
     ...(args.row.sourceKind !== undefined ? { sourceKind: args.row.sourceKind } : {}),
-    operations: args.operations ?? (args.area === 'static-scan' || args.area === 'fixture-validation' ? ['scan'] : args.area === 'runtime' ? ['runtime-observation'] : ['toggle', 'restore']),
+    operations: args.operations ?? (args.area === 'static-scan' || args.area === 'fixture-validation' ? ['scan'] : ['toggle', 'restore']),
     ...(args.controlScope ? { controlScope: args.controlScope } : {}),
     ...(args.mcpTransport ? { mcpTransport: args.mcpTransport } : {}),
     status: args.status,
@@ -80,9 +80,7 @@ export function buildCapabilityEvidence(args: {
   if (!rows) return result;
   for (const row of rows) {
     const partialCoverage = args.agentId === 'zcode' || args.agentId === 'deepseek-harness';
-    const reference = args.agentId === 'codex' || args.agentId === 'claude-code'
-      ? 'tests/adapters.test.ts; tests/plugin-cache.test.ts'
-      : 'tests/adapters.test.ts; tests/plugin-cache.test.ts';
+    const reference = 'tests/adapters.test.ts; tests/plugin-cache.test.ts';
     result.push(evidence({
       area: 'static-scan', row, status: partialCoverage ? 'partial' : 'verified', readable: true, writable: false, reference,
       reason: partialCoverage
@@ -123,10 +121,6 @@ export function buildCapabilityEvidence(args: {
         reference: basicNativeVerified ? 'tests/native-codex-controls.test.ts' : 'tests/native-codex.test.ts',
         version: args.versionEvidence!.version, platform: args.versionEvidence!.platform,
       } : {}),
-    }));
-    result.push(evidence({
-      area: 'runtime', row, status: 'unverified', readable: false, writable: false,
-      reason: 'AgentDeck 未观察客户端是否已加载或正在运行该资源。',
     }));
   }
   return result;

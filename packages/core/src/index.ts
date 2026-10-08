@@ -420,7 +420,6 @@ export class ManagerService {
           instanceId: instance.id,
           writable,
           readOnlyReason: writable ? null : binding.readOnlyReason ?? '该资源没有已验证的写入机制。',
-          runtime: binding.runtime ?? 'unknown',
           diagnostics: [...binding.diagnostics, ...report.diagnostics],
           updatedAt: this.now().toISOString(),
           };
