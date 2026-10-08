@@ -365,7 +365,7 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
     await manager.scan({ instanceId: plan.instanceId, ...(priorBinding?.projectId ? { projectId: priorBinding.projectId } : {}) });
     const refreshedBinding = store.getBinding(plan.bindingId);
     if (refreshedBinding && plan.desiredEnabled !== null) {
-      store.putBinding({ ...refreshedBinding, enabled: plan.desiredEnabled, runtime: 'unknown', updatedAt: (options.now?.() ?? new Date()).toISOString() });
+      store.putBinding({ ...refreshedBinding, enabled: plan.desiredEnabled, updatedAt: (options.now?.() ?? new Date()).toISOString() });
     }
     app.agentdeckEvents.publish({ type: 'operation.completed', operationId: applied.operation.id, instanceId: plan.instanceId, payload: { operation: applied.operation } });
     app.agentdeckEvents.publish({ type: 'catalog.changed', instanceId: plan.instanceId, payload: { kind: 'operation', operationId: applied.operation.id } });
@@ -485,7 +485,6 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
             store.putBinding({
               ...refreshedBinding,
               enabled: originalPlan.dto.desiredEnabled,
-              runtime: 'unknown',
               updatedAt: (options.now?.() ?? new Date()).toISOString(),
             });
           }

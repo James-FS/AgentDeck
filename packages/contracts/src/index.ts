@@ -12,10 +12,9 @@ export type ConfigurationControl = z.infer<typeof ConfigurationControlSchema>;
 export type SkillScope = 'user-global' | 'project' | 'project-directory' | 'native';
 export type SourceKind = 'user' | 'repository' | 'plugin' | 'builtin' | 'organization' | 'account-sync' | 'unknown';
 export type CompatibilityClass = 'portable' | 'agent-specific' | 'conditional' | 'unknown';
-export type RuntimeState = 'unknown' | 'pending' | 'active' | 'inactive';
 export type DiscoveryKind = 'auto' | 'manual' | 'demo';
 export type ClientCompatibilityStatus = 'verified-client' | 'executable-unverified' | 'configuration-only' | 'not-found' | 'demo';
-export type CapabilityEvidenceArea = 'static-scan' | 'fixture-validation' | 'native-config' | 'runtime';
+export type CapabilityEvidenceArea = 'static-scan' | 'fixture-validation' | 'native-config';
 export type CapabilityEvidenceStatus = 'verified' | 'partial' | 'unverified' | 'unsupported';
 export type CapabilityControlScope = 'standalone-user-mcp' | 'user-config-skill' | 'local-marketplace-plugin';
 
@@ -42,7 +41,7 @@ export interface CapabilityEvidence {
   sourceKind?: SourceKind | null;
   controlScope?: CapabilityControlScope;
   mcpTransport?: 'stdio' | 'http' | 'unknown';
-  operations?: Array<'scan' | 'toggle' | 'restore' | 'runtime-observation'>;
+  operations?: Array<'scan' | 'toggle' | 'restore'>;
   status: CapabilityEvidenceStatus;
   readable: boolean;
   writable: boolean;
@@ -154,7 +153,6 @@ export interface Binding {
   /** Derived static toggle address; never accepted from a client request. */
   toggleTarget?: { agentId: 'zcode' | 'claude-code'; path: string[]; defaultEnabled: boolean }
     | { agentId: 'deepseek-harness'; kind: 'dsh-yaml'; configPath: string; id: string; name: string };
-  runtime: RuntimeState;
   /** Evidence of the switch mechanism, independent of whether it is currently enabled. */
   configurationControl?: ConfigurationControl;
   writable: boolean;
@@ -185,27 +183,6 @@ export interface Catalog {
   projects: Project[];
   bindings: Binding[];
   lastScanAt: string | null;
-}
-
-/** A read-only assessment of evidence available to this manager, not a client probe. */
-export interface RuntimeObservation {
-  bindingId: string;
-  instanceId: string;
-  kind: ResourceKind;
-  configurationEnabled: boolean | null;
-  indexUpdatedAt: string;
-  sessionLoad: 'not-checked' | 'not-applicable';
-  mcpConnection: 'not-checked' | 'not-applicable' | 'not-started' | 'starting' | 'connected' | 'authentication-required' | 'failed' | 'cancelled' | 'disabled';
-  clientSessionId: string | null;
-  threadId: string | null;
-  evidenceSource: 'codex-app-server-session' | null;
-  observedAt: string | null;
-  reason: string;
-}
-
-export interface RuntimeReport {
-  assessedAt: string;
-  observations: RuntimeObservation[];
 }
 
 export interface AdapterInfo {

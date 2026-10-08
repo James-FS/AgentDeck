@@ -59,7 +59,6 @@ describe('independent adapter verification', () => {
       const report = await entry.scan({ instance: instance(entry.id) });
       expect(report.bindings.length, entry.id).toBeGreaterThan(0);
       expect(JSON.stringify(report)).not.toContain('AGENTDECK_SECRET_SENTINEL');
-      expect(report.bindings.every((binding) => binding.runtime === 'unknown'), entry.id).toBe(true);
       expect(report.bindings.every((binding) => binding.writable === false), entry.id).toBe(true);
       expect(report.bindings.every((binding) => ['configuration', 'cache', 'filesystem'].includes(binding.origin ?? '')), entry.id).toBe(true);
     }
@@ -145,7 +144,6 @@ describe('independent adapter verification', () => {
       expect(peer.id).not.toBe(skill.id);
       expect(skill.enabled).toBe(true);
       expect(skill.writable).toBe(false);
-      expect(skill.runtime).toBe('unknown');
       expect(skill.diagnostics.some(message => message.includes('仅为磁盘发现'))).toBe(true);
       expect(report.bindings.some(item => item.sourcePath === deep || item.sourcePath === outside)).toBe(false);
       expect(await fileTreeDigests(home)).toEqual(before);
@@ -173,7 +171,6 @@ describe('independent adapter verification', () => {
     expect(skill.displayName).toBe('Displayed Review');
     expect(skill.enabled).toBe(true);
     expect(skill.configurationEnabled).toBeUndefined();
-    expect(skill.runtime).toBe('unknown');
   });
 
   it('marks project resources as repository sources without making every skill portable', async () => {

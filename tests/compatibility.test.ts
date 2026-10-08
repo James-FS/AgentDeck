@@ -98,13 +98,12 @@ describe('client compatibility evidence over authenticated HTTP', () => {
     }
     expect(input.env.OPENAI_API_KEY).toBeUndefined();
     expect(JSON.stringify(result)).not.toContain('PRIVATE_STDERR_SENTINEL');
-    expect(client.capabilities.filter(item => item.area === 'runtime').every(item => item.status === 'unverified')).toBe(true);
     const native = client.capabilities.filter(item => item.area === 'native-config' && item.status === 'verified' && item.resourceKind === 'mcp');
     expect(native).toHaveLength(process.platform === 'win32' ? 1 : 0);
     expect(native.every(item => item.resourceKind === 'mcp' && item.scope === 'native' && item.sourceKind === 'user' && item.controlScope === 'standalone-user-mcp' && item.mcpTransport === 'stdio' && item.clientVersion === '0.159.2' && item.platform === 'win32')).toBe(true);
     const catalog = await call<Catalog>('POST', '/scans', { instanceId: instance.id });
     expect(catalog.instances.find(row => row.id === instance.id)?.writable).toBe(false);
-    expect(catalog.bindings.every(row => !row.writable && row.runtime === 'unknown')).toBe(true);
+    expect(catalog.bindings.every(row => !row.writable)).toBe(true);
     expect(await fileTreeDigests(home)).toEqual(before);
   });
 

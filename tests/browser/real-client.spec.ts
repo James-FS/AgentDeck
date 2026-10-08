@@ -68,7 +68,7 @@ test('verifies installed client sources through the built UI without modifying t
     expect(response.ok()).toBe(true);
     const catalog = await response.json() as Catalog;
     expect(catalog.instances.every(item => !item.writable)).toBe(true);
-    expect(catalog.bindings.every(item => !item.writable && item.runtime === 'unknown')).toBe(true);
+    expect(catalog.bindings.every(item => !item.writable)).toBe(true);
     expect(catalog.bindings.every(item => ['configuration', 'cache', 'filesystem'].includes(item.origin ?? ''))).toBe(true);
     expect(new Set(catalog.bindings.map(item => item.id)).size).toBe(catalog.bindings.length);
     const session = await page.request.get(new URL('/api/v1/session', startupUrl).href);
