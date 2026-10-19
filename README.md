@@ -1,93 +1,91 @@
 # AgentDeck
 
-当前版本聚焦本机 MCP、插件和 Skill 的分类、范围、Agent 归属、来源与配置状态。列表支持受支持资源的单项启停，并保留预览、备份和恢复；不支持的资源保持只读。客户端适用性和实时运行状态功能已取消。跨 Agent 转移、插件安装更新、批量操作和桌面壳不在当前范围。
+AgentDeck 是一个运行在本机的 Web 工具，用于发现和管理 Codex、ZCode、Claude Code 与 DeepSeek Harness 的部分本地 Skill、插件和 MCP 配置。它会扫描配置并展示资源来源、作用范围、Agent 归属及可识别的启用状态；它不会启动 MCP 服务、Skill 或插件进程。
 
-Codex、ZCode、Claude Code 和 DeepSeek Harness 的部分用户级配置支持单项启停；Codex Skill 与插件写入限定已验证的 CLI 0.159.2 / Windows。其他资源和未验证范围只读。
+## 当前功能
 
-## 快速开始
+- 自动发现客户端配置，或手动登记实例和项目；扫描用户配置及已登记项目。
+- 对 Skill、插件和 MCP 配置进行分类，查看配置记录、插件缓存、来源路径和关联证据。
+- 查看客户端与版本识别报告。显式版本检查只对 Codex 和 Claude Code 的可执行候选，在隔离临时目录中运行受限 `--version` 命令；检查结果不会自动开放写入。
+- 对明确支持的单项配置创建预览计划，再应用变更；操作记录支持基于备份生成恢复计划。
+- 加载隔离的演示数据体验界面。
 
-需要 Node.js 24.7.0 和 pnpm 11.22.0。在仓库根目录运行：
+### 写入范围
+
+扫描到资源不代表该资源可写。项目级配置和未验证的资源保持只读。当前支持的范围如下：
+
+- **ZCode**：支持部分用户级 Skill、已配置或已安装插件，以及独立 MCP 的启停。
+- **Codex**：独立的用户级 MCP 启停不要求版本验证，当前按实验性支持开放；用户配置根中的 Skill 覆盖和本地市场插件，仅支持已检查为 **Codex CLI 0.159.2 / Windows** 的实例。
+- **Claude Code**：支持部分用户级插件启用状态开关；Skill、MCP 和项目级配置保持只读。
+- **DeepSeek Harness**：支持部分用户级 `cordis.patch.yaml` 插件行的 `disabled` 开关；项目级条目、管理器必需组件及插件附带 MCP 保持只读。
+
+具体资源是否可写还取决于其配置格式、来源和扫描结果。所有变更都需先创建并确认计划；隔离演示配置与真实客户端配置分开。Codex 原生验收仅覆盖隔离配置根中的独立用户级 STDIO MCP 配置读写与恢复，不代表运行中的客户端已加载变更。
+
+## 环境要求
+
+- Node.js `>=22.12.0`；仓库 `.nvmrc` 指定 `24.7.0`。
+- pnpm `11.22.0`（由根目录 `package.json` 固定）。
+
+## 开发运行
+
+在仓库根目录执行：
 
 ```sh
 pnpm install
 pnpm dev
 ```
 
-开发服务只绑定本机：API 为 `127.0.0.1:4780`，网页为 `127.0.0.1:5173`。终端会打印一次性连接链接；打开它后，浏览器兑换本机会话，并用 CSRF token 保护写请求。
+开发模式启动本地 API 和 Vite 页面：API 默认监听 `127.0.0.1:4780`，页面监听 `127.0.0.1:5173`。终端会打印一次性连接链接；使用该链接打开页面并建立本机会话。写请求受 CSRF token 保护。
 
-开发数据和默认扫描 home 位于 `work/dev-data` 与 `work/dev-data/home`，隔离演示文件位于 `work/demo`。可用 `AGENTDECK_DEV_HOME` 指定开发扫描 home。生产时用 `AGENTDECK_HOME` 指定管理器数据目录，或用 `USER_HOME` / `AGENTDECK_USER_HOME` 指定扫描 home。客户端自己的 `CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`DSH_HOME` 等环境变量仍可选择客户端配置根目录。
+开发数据默认保存在 `work/dev-data`，隔离扫描 home 位于 `work/dev-data/home`，演示配置位于 `work/demo`。可设置 `AGENTDECK_DEV_HOME` 更换开发扫描 home。开发时使用隔离目录，不要把演示或测试操作指向真实用户目录。
 
-首次打开资源页，点击“发现并扫描本机资源”读取当前用户的实际客户端配置；这会跳过开发模式默认的隔离扫描目录。扫描结果保存到本地索引，真实配置不会被改写。“重新扫描已登记实例”刷新已经接入的实例；未选项目时同时刷新全部明确登记的项目，不寻找未登记项目。也可以载入隔离演示数据体验交互。
-
-自动发现与手动登记默认允许已支持资源的单项启停，无需额外开放按钮；可显式登记只读。演示目标使用独立文件。Codex CLI 0.159.2 / Windows 的独立用户级 STDIO MCP 已在隔离配置根完成配置复读与恢复验收。真实配置未用于写入，运行时生效未验证。未匹配版本或范围的能力保持只读。原始计划字节和恢复快照可能含秘密；数据目录使用 Windows ACL 继承，没有额外加密或 ACL 设置。请将 `AGENTDECK_HOME` 放在仅当前用户可访问的位置。
-
-AgentDeck is a local web manager for viewing and classifying Agent configuration instances, projects, Skills, plugins, and MCP entries. It provides four scanners and guarded single-resource configuration switches where the client format is verified, with preview, backup, conflict checks, and restore.
-
-Read-only configuration and plugin cache layouts have been checked on this Windows machine. Codex CLI 0.159.2 has passed native configuration reread and toggle/restore validation for independent user STDIO MCP entries in isolated configuration roots. Runtime activation remains unverified. Supported single-resource switches are allowed by default for discovered and registered instances; an explicit read-only choice is respected. A write plan still requires a verified toggle target. The demo has a separate, isolated Codex target. The app does not start Skills, plugins, or MCP processes. An explicit version check runs only the supported CLI's bounded `--version` command in an isolated environment.
-
-插件缓存按市场、插件身份与版本建立父子索引。资源页可区分缓存、配置记录和本地文件；详情展示资源配置状态、关联配置证据、缓存状态、实际存放位置和分类依据。登记项目后点击项目卡片的“扫描项目”，读取该项目范围的候选配置和 Skills；项目配置及插件资源保持只读。
-
-资源归类分为用户全局来源、项目公共来源、Agent 全局资源、Agent 项目资源、待确定；存放归属与配置/使用范围分开。用户全局不代表所有 Agent 共用，所属 Agent 不表示内容专用；共享来源需要同一实际来源的多 Agent 索引证据。
-
-实例页提供客户端兼容报告，区分已识别 CLI、未验证的可执行候选、仅有配置、未发现和隔离演示。显式检查版本后，证据按可执行路径及文件身份保存；替换、删除或检查失败使旧证据失效。静态扫描、夹具与原生配置证据分别展示，不评估资源内容适用性。检查版本不会开放写入许可。
-
-## Requirements
-
-- Node.js 24.7.0 (the workspace requires Node.js 22.12 or later)
-- pnpm 11.22.0
-
-Install the pinned workspace dependencies once:
-
-```sh
-pnpm install
-```
-
-## Development
-
-Start the API and Vite UI together:
-
-```sh
-pnpm dev
-```
-
-The local API listens on `127.0.0.1:4780`; Vite listens on `127.0.0.1:5173`. The server prints a one-time startup link for the Vite page. Open that link to exchange its fragment ticket for a same-site HttpOnly session cookie. The browser then uses a CSRF token for writes.
-
-Development state and the default scan home stay inside the repository at `work/dev-data` and `work/dev-data/home`. Set `AGENTDECK_DEV_HOME` to choose a different isolated development home. Do not point it at a real user home while testing.
-
-The sample demo files are created under `work/demo`. If `AGENTDECK_HOME` is set, application data goes there and demo files are created in its `demo` directory. `POST /api/v1/demo` is idempotent and scans the actual sample files through the adapters, so the displayed toggle follows their current contents.
-
-## Production build and start
-
-Build the packages, server bundle, and Vue static files from the repository root:
+## 构建与启动
 
 ```sh
 pnpm build
 pnpm start
 ```
 
-The server binds to loopback only and serves the built UI and `/api/v1` from one origin. The default application data path follows the platform's local application-data directory. Set `AGENTDECK_HOME` to select an explicit state directory, and `USER_HOME` or `AGENTDECK_USER_HOME` to select the home directory used for an intentional discovery scan. `PORT` changes the local listen port; the default is `4780`.
+生产模式下，服务只监听回环地址 `127.0.0.1`，并由同一服务提供构建后的 Web 页面和 `/api/v1` API。默认端口为 `4780`，可通过 `PORT` 修改。启动前需要先构建。
 
-## First-round API
+也可用命令行入口启动 Web 服务（同样需要先构建完整项目）：
 
-The JSON API is under `/api/v1`. Useful routes are:
+```sh
+pnpm build
+node apps/cli/dist/index.js serve
+```
 
-- `GET /health` — startup status and application version, without filesystem paths or credentials.
-- `GET /api/v1/adapters` and `GET /api/v1/catalog` — adapter capabilities and the current local catalog.
-- `GET /api/v1/compatibility` — client identity observations and capability evidence, including unregistered adapters.
-- `POST /api/v1/instances/:id/version-check` with `{}` — explicitly query a supported CLI version in isolated state; command paths cannot be supplied by the browser.
-- `POST /api/v1/instances` and `POST /api/v1/projects` — explicitly register a configuration root or project.
-- `POST /api/v1/scans` — scan registered instances, optionally discover instances or select a project.
-- `POST /api/v1/demo` — create or refresh the isolated example catalog.
-- `POST /api/v1/plans` — prepare a supported single-resource configuration toggle (Codex, ZCode, Claude Code, or DeepSeek Harness, within the documented support scope); the returned plan contains a redacted diff and digest.
-- `POST /api/v1/plans/:id/apply` — apply the reviewed plan using its `afterHash` as `digest`.
-- `GET /api/v1/operations` and `POST /api/v1/operations/:id/restore-plan` — inspect operations and prepare a restore plan.
-- `GET /api/v1/events` — authenticated SSE updates for catalog and operation changes.
+CLI 当前仅提供 `serve [--port=4780]`，不提供独立资源管理命令。
 
-Success responses return their DTO directly. API errors use `{ "error": { "code", "message", "requestId?" } }`. Every API route except health and the one-time bootstrap exchange requires a browser session. The bootstrap ticket is held in server memory, expires, and can be redeemed once. Browser origins are limited to the service origin and, in explicit development mode, the Vite origin. The service does not enable general CORS.
+## 数据与配置目录
 
-Catalog responses include structured metadata and paths for registered configuration sources. They do not include raw configuration documents, environment credentials, or OAuth tokens. Full snapshots and prepared plans may contain secrets. They are stored as plaintext in the application data directory and are never returned through the browser API. Windows relies on the inherited directory ACL; AgentDeck does not currently set an explicit ACL or encrypt stored bytes.
+- `AGENTDECK_HOME`：指定 AgentDeck 的应用数据目录，包含本地 SQLite 数据库、变更计划及备份/恢复所需数据。
+- 未设置 `AGENTDECK_HOME` 时，生产数据默认位于 Windows `%LOCALAPPDATA%\AgentDeck`、macOS `~/Library/Application Support/AgentDeck`，或 Linux `$XDG_DATA_HOME/agentdeck`（未设置时为 `~/.local/share/agentdeck`）。开发数据默认位于仓库的 `work/dev-data`。
+- `USER_HOME` 或 `AGENTDECK_USER_HOME`：指定主动发现扫描所使用的用户 home。生产环境默认使用当前操作系统用户的 home；开发环境默认使用隔离扫描目录。`AGENTDECK_DEV_HOME` 只用于开发环境。
+- `CODEX_HOME`、`ZCODE_HOME`、`CLAUDE_CONFIG_DIR`、`DSH_HOME`：可分别指定对应客户端的配置根目录。
 
-## Available checks
+AgentDeck 的操作计划和备份可能包含原始配置字节及敏感信息，并以明文保存在应用数据目录。请将该目录放在仅可信用户可访问的位置；程序不负责加密数据或配置专用文件 ACL。
+
+## API 概览
+
+API 前缀为 `/api/v1`。常用路由：
+
+| 方法 | 路由 | 用途 |
+| --- | --- | --- |
+| `GET` | `/health` | 本机服务状态和版本 |
+| `GET` | `/api/v1/adapters`、`/api/v1/catalog` | 适配器能力与资源目录 |
+| `GET` | `/api/v1/compatibility` | 客户端识别和能力证据 |
+| `POST` | `/api/v1/instances`、`/api/v1/projects` | 登记配置实例或项目 |
+| `POST` | `/api/v1/scans` | 发现或扫描已登记资源 |
+| `POST` | `/api/v1/instances/:id/version-check` | 主动检查客户端版本 |
+| `POST` | `/api/v1/demo` | 创建或刷新隔离演示目录 |
+| `POST` | `/api/v1/plans`、`/api/v1/plans/:id/apply` | 创建和应用单项变更计划 |
+| `GET` | `/api/v1/operations`、`POST /api/v1/operations/:id/restore-plan` | 查看操作记录并准备恢复计划 |
+| `GET` | `/api/v1/events` | 接收目录和操作更新事件（SSE） |
+
+除 `/health` 和一次性会话引导接口外，API 需要本机会话。服务拒绝非本机连接，不开放通用 CORS。目录 API 返回结构化元数据，不返回原始配置文档或凭据。
+
+## 开发检查
 
 ```sh
 pnpm typecheck
@@ -97,6 +95,15 @@ pnpm build
 pnpm test:e2e
 ```
 
-Build before running the browser test because it starts the compiled server and serves `apps/web/dist`. Playwright uses an installed Edge or Chrome from its standard Windows path, or `AGENTDECK_BROWSER_PATH` if set. For example, in PowerShell: `$env:AGENTDECK_BROWSER_PATH='C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'`. Browser artifacts and temporary data are written under the ignored `work/` directory.
+浏览器测试由 Playwright 驱动，需要本机已安装 Edge 或 Chrome；也可通过 `AGENTDECK_BROWSER_PATH` 指定浏览器可执行文件。浏览器测试报告、截图和临时数据写入被 Git 忽略的 `work/` 目录。
 
-Configuration controls are limited to the supported single-resource targets. Sample tests do not count as native validation against an installed client version.
+## 项目结构
+
+- `apps/web`：Vue Web 界面。
+- `apps/server`：Fastify 本机服务与 API。
+- `apps/cli`：启动本机 Web 服务的命令行入口。
+- `packages/adapters`：四种客户端的发现与扫描适配器。
+- `packages/core`：目录、发现、扫描和版本识别服务。
+- `packages/change-engine`：配置变更计划、应用和恢复。
+- `packages/contracts`、`packages/storage`：共享类型与本地 SQLite 存储。
+- `fixtures`、`tests`：扫描夹具、单元测试和浏览器测试。
