@@ -1,8 +1,10 @@
 import { createApp, startLocalServer } from './app.js';
+import { openLocalBrowser } from './open-browser.js';
 
 process.env.NODE_ENV ??= 'production';
 const app = createApp({ port: Number(process.env.PORT ?? 4780) });
-await startLocalServer(app, Number(process.env.PORT ?? 4780));
+const url = await startLocalServer(app, Number(process.env.PORT ?? 4780));
+if (process.env.AGENTDECK_OPEN_BROWSER === '1') openLocalBrowser(url);
 
 const shutdown = async () => {
   await app.close();
