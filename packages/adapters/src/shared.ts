@@ -196,6 +196,8 @@ export function baseBinding(args: {
   mcpConfig?: Record<string, unknown> | null;
   location?: NonNullable<Binding['classification']>['location'];
   pluginIdentityVerified?: boolean;
+  skillRootPath?: string;
+  skillRootRealPath?: string;
 }): Binding {
   const sourcePath = normalizePath(args.sourcePath);
   const projectId = args.projectId === undefined ? (args.context.project?.id ?? null) : args.projectId;
@@ -261,6 +263,8 @@ export function baseBinding(args: {
     ...(args.configurationEnabled === undefined ? {} : { configurationEnabled: args.configurationEnabled }),
     ...(args.cacheState === undefined ? {} : { cacheState: args.cacheState }),
     ...(args.mcpTransport === undefined ? {} : { mcpTransport: args.mcpTransport }),
+    ...(args.skillRootPath === undefined ? {} : { skillRootPath: normalizePath(args.skillRootPath) }),
+    ...(args.skillRootRealPath === undefined ? {} : { skillRootRealPath: normalizePath(args.skillRootRealPath) }),
   };
   if (args.kind === 'mcp' && args.mcpConfig) mcpDeclarations.set(binding, args.mcpConfig);
   return binding;
@@ -383,6 +387,7 @@ export function instance(args: {
   name: string;
   configRoot: string;
   executable: string | null;
+  userHomeDir?: string;
   discovery?: AgentInstance['discovery'];
   diagnostics?: string[];
 }): AgentInstance {
@@ -393,6 +398,7 @@ export function instance(args: {
     agentId: args.agentId,
     name: args.name,
     configRoot,
+    ...(args.userHomeDir ? { userHomeDir: normalizePath(args.userHomeDir) } : {}),
     version: null,
     executable: args.executable,
     discovery: args.discovery ?? 'auto',
@@ -482,6 +488,9 @@ export async function scanSkillRoot(args: {
 }): Promise<Binding[]> {
   const bindings: Binding[] = [];
   if (!(await existsDirectory(args.root))) return bindings;
+  const skillRootPath = path.resolve(args.root);
+  let skillRootRealPath: string;
+  try { skillRootRealPath = await realpath(args.root); } catch { args.diagnostics.push(`无法确定 Skill 扫描根的物理路径：${args.root}`); return bindings; }
   let visited = 0;
   const walk = async (root: string, depth: number): Promise<void> => {
     if (visited >= MAX_SKILL_DIRECTORY_VISITS) return;
@@ -509,6 +518,8 @@ export async function scanSkillRoot(args: {
         scope: args.scope,
         sourceKind: args.sourceKind,
         ...(args.location ? { location: args.location } : {}),
+        skillRootPath,
+        skillRootRealPath,
         sourcePath: info,
         nativeKey: path.resolve(info),
         identityPath: await canonicalPath(info),
@@ -560,8 +571,11 @@ export async function scanSingleSkill(args: {
       args.diagnostics.push('某个插件声明的 Skill manifest 不可读或超限，已跳过。');
       return [];
     }
+    let skillRootRealPath: string;
+    try { skillRootRealPath = await realpath(args.directory); } catch { return []; }
     return [baseBinding({
       context: args.context, kind: 'skill', name: path.basename(args.directory), scope: 'native',
+      skillRootPath: path.resolve(args.directory), skillRootRealPath,
       ...(metadata.name ? { displayName: metadata.name } : {}),
       description: metadata.description ?? safeDescription('skill', path.basename(args.directory)),
       sourceKind: 'plugin', sourcePath: args.directory, nativeKey: path.resolve(args.directory),

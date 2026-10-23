@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { request as httpRequest } from 'node:http';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createApp } from '../apps/server/src/app.ts';
 import { createStore } from '../packages/storage/src/index.ts';
@@ -94,6 +94,182 @@ describe('local API with actual network peers and isolated configuration', () =>
     const ticket = app.agentdeckAuth.issueBootstrapTicket();
     expect((await call('POST', '/api/v1/session/bootstrap', { ticket }, false)).status).toBe(200);
     expect((await call('POST', '/api/v1/session/bootstrap', { ticket }, false)).status).toBe(401);
+  });
+
+  it('serves details and full-text search only for registered, scanned Skills', async () => {
+    const skillRoot = path.join(directory, 'independent-skills', 'long-description');
+    await mkdir(skillRoot, { recursive: true });
+    const description = 'A complete description. '.repeat(35);
+    await writeFile(path.join(skillRoot, 'SKILL.md'), `---\nname: long-description\ndescription: "${description.trim()}"\nauthor: Grace\n---\n# Searchable body\nneedlephrase`);
+    const root = path.dirname(skillRoot);
+    const registration = await call<{ id: string }>('POST', '/api/v1/skill-sources', { path: root });
+    expect(registration.status).toBe(201);
+    const findingPath = path.join(skillRoot, 'SKILL.md');
+    const details = await call('GET', `/api/v1/skills/details?sourceId=${encodeURIComponent(registration.body.id)}&findingPath=${encodeURIComponent(findingPath)}`);
+    expect(details.status, JSON.stringify(details.body)).toBe(200);
+    expect(details.body.description).toBe(description.trim());
+    expect(details.body.author).toBe('Grace');
+    expect(details.body.body).toContain('needlephrase');
+    const search = await call('GET', `/api/v1/skills/search?q=needlephrase`);
+    expect(search.body.matches).toHaveLength(1);
+    expect(search.body).toMatchObject({ totalCandidates: 1, examined: 1, truncated: false, nextOffset: null });
+    expect((await call('GET', `/api/v1/skills/details?sourceId=missing&findingPath=${encodeURIComponent(findingPath)}`)).status).toBe(404);
+    expect((await call('GET', `/api/v1/skills/details?sourceId=${encodeURIComponent(registration.body.id)}&findingPath=${encodeURIComponent(path.join(directory, 'README.md'))}`)).status).toBe(404);
+    expect((await call('GET', `/api/v1/skills/details?sourceId=${encodeURIComponent(registration.body.id)}&findingPath=${encodeURIComponent(findingPath)}`, undefined, false)).status).toBe(401);
+  });
+
+  it('searches the parsed manifest name when it differs from the containing folder', async () => {
+    const root = path.join(directory, 'manifest-name-search');
+    const skillDir = path.join(root, 'folder-name');
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(path.join(skillDir, 'SKILL.md'), '---\nname: metadata-unique-name-472\ndescription: A helpful utility.\n---\n# Guide');
+    const registration = await call<{ id: string }>('POST', '/api/v1/skill-sources', { path: root });
+    expect(registration.status).toBe(201);
+    const search = await call('GET', '/api/v1/skills/search?q=metadata-unique-name-472');
+    expect(search.body).toMatchObject({ examined: 1, failures: 0, matches: [{ name: 'metadata-unique-name-472' }] });
+    expect(search.body.matches[0].snippet).toContain('metadata-unique-name-472');
+  });
+
+  it('paginates a bounded full-text search and reports every candidate through a continuation offset', async () => {
+    const root = path.join(directory, 'paged-search-library');
+    for (let index = 0; index < 31; index += 1) {
+      const skillDir = path.join(root, `skill-${String(index).padStart(2, '0')}`);
+      await mkdir(skillDir, { recursive: true });
+      const marker = index === 30 ? 'PAGED_LATE_NEEDLE_552' : `ordinary-${index}`;
+      await writeFile(path.join(skillDir, 'SKILL.md'), `---\nname: skill-${index}\ndescription: Search page ${index}.\n---\n${marker}`);
+    }
+    const registration = await call<{ id: string }>('POST', '/api/v1/skill-sources', { path: root, mode: 'deep' });
+    expect(registration.status).toBe(201);
+    const first = await call('GET', '/api/v1/skills/search?q=PAGED_LATE_NEEDLE_552&offset=0');
+    expect(first.body.matches).toHaveLength(0);
+    expect(first.body).toMatchObject({ totalCandidates: 31, examined: 30, truncated: true, nextOffset: 30 });
+    const second = await call('GET', `/api/v1/skills/search?q=PAGED_LATE_NEEDLE_552&offset=${first.body.nextOffset}`);
+    expect(second.body.matches).toHaveLength(1);
+    expect(second.body).toMatchObject({ totalCandidates: 31, examined: 1, truncated: false, nextOffset: null });
+  });
+
+  it('reports independent candidates as unbound and rechecks their current format and disk presence', async () => {
+    const { instance } = await writableCodex();
+    const root = path.join(directory, 'independent-status-library');
+    const malformed = path.join(root, 'malformed');
+    await mkdir(malformed, { recursive: true });
+    const manifest = path.join(malformed, 'SKILL.md');
+    await writeFile(manifest, '---\nname: [broken\n---\n# candidate');
+    const registration = await call<{ id: string }>('POST', '/api/v1/skill-sources', { path: root, mode: 'deep' });
+    const availability = await call('GET', `/api/v1/skills/availability?instanceId=${encodeURIComponent(instance.id)}`);
+    const candidate = availability.body.independent.find((item: { sourceId: string }) => item.sourceId === registration.body.id);
+    expect(candidate).toMatchObject({ status: 'present', format: 'invalid', bound: false });
+    await rm(manifest);
+    const afterRemoval = await call('GET', `/api/v1/skills/availability?instanceId=${encodeURIComponent(instance.id)}`);
+    expect(afterRemoval.body.independent.find((item: { sourceId: string }) => item.sourceId === registration.body.id))
+      .toMatchObject({ status: 'missing', format: 'unavailable', bound: false });
+  });
+
+  it('rejects an independent source root replaced by a junction to another same-home directory', async () => {
+    const { instance } = await writableCodex();
+    const sourceRoot = path.join(directory, 'replaceable-skill-root');
+    const outsideRoot = path.join(directory, 'outside-private-root');
+    const skillDir = path.join(sourceRoot, 'scanned-skill');
+    await mkdir(skillDir, { recursive: true });
+    await mkdir(outsideRoot, { recursive: true });
+    await writeFile(path.join(skillDir, 'SKILL.md'), '---\nname: scanned-skill\ndescription: safe.\n---');
+    await writeFile(path.join(outsideRoot, 'SKILL.md'), '---\nname: private.\ndescription: private.\n---\nPRIVATE_SOURCE_JUNCTION_184');
+    const source = await call<{ id: string }>('POST', '/api/v1/skill-sources', { path: sourceRoot, mode: 'deep' });
+    const findingPath = path.join(skillDir, 'SKILL.md');
+    await rm(sourceRoot, { recursive: true });
+    await symlink(outsideRoot, sourceRoot, 'junction');
+    const detail = await call('GET', `/api/v1/skills/details?sourceId=${encodeURIComponent(source.body.id)}&findingPath=${encodeURIComponent(findingPath)}`);
+    expect(detail.status).toBe(403);
+    const search = await call('GET', '/api/v1/skills/search?q=PRIVATE_SOURCE_JUNCTION_184');
+    expect(search.body.matches).toHaveLength(0);
+    const availability = await call('GET', `/api/v1/skills/availability?instanceId=${encodeURIComponent(instance.id)}`);
+    expect(availability.body.independent.find((item: { sourceId: string }) => item.sourceId === source.body.id))
+      .toMatchObject({ status: 'unreadable', bound: false });
+  });
+
+  it('keeps configuration-only Skill records inspectable without exposing the config file as Markdown', async () => {
+    const settingsPath = path.join(home, '.claude', 'settings.json');
+    await writeFile(settingsPath, JSON.stringify({ skillOverrides: { 'manual-only-skill': 'off' } }));
+    const registered = await call<AgentInstance>('POST', '/api/v1/instances', { agentId: 'claude-code', configRoot: path.join(home, '.claude') });
+    await call('POST', '/api/v1/scans', { instanceId: registered.body.id });
+    const catalog = await call<Catalog>('GET', '/api/v1/catalog');
+    const override = catalog.body.bindings.find(item => item.kind === 'skill' && item.name === 'manual-only-skill')!;
+    expect(override).toBeDefined();
+    const details = await call('GET', `/api/v1/skills/details?bindingId=${encodeURIComponent(override.id)}`);
+    expect(details.status).toBe(200);
+    expect(details.body.body).toBe('');
+    expect(details.body.metadataIssues[0]).toContain('配置项');
+    expect(details.body.body).not.toContain('skillOverrides');
+    const availability = await call('GET', `/api/v1/skills/availability?instanceId=${encodeURIComponent(registered.body.id)}`);
+    expect(availability.body.bindings[override.id]).toMatchObject({ disk: 'configuration-only', format: 'unavailable' });
+    const search = await call('GET', '/api/v1/skills/search?q=manual-only-skill');
+    expect(search.body.matches.some((item: { bindingId: string }) => item.bindingId === override.id)).toBe(true);
+  });
+
+  it('locates user-home and project Skill bindings through trusted registered roots for details and search', async () => {
+    const globalDir = path.join(home, '.agents', 'skills', 'global-needle');
+    const projectRoot = path.join(directory, 'registered-project');
+    const projectDir = path.join(projectRoot, '.agents', 'skills', 'project-needle');
+    await mkdir(globalDir, { recursive: true });
+    await mkdir(projectDir, { recursive: true });
+    await writeFile(path.join(globalDir, 'SKILL.md'), '---\nname: global-needle\ndescription: Global skill.\n---\nGLOBAL_NEEDLE_738');
+    await writeFile(path.join(projectDir, 'SKILL.md'), '---\nname: project-needle\ndescription: Project skill.\n---\nPROJECT_NEEDLE_941');
+    const registeredInstance = await call<AgentInstance>('POST', '/api/v1/instances', { agentId: 'codex', configRoot: path.join(home, '.codex') });
+    const registeredProject = await call<{ id: string }>('POST', '/api/v1/projects', { rootPath: projectRoot });
+    const projectId = registeredProject.body.id;
+    const scanned = await call<Catalog>('POST', '/api/v1/scans', { instanceId: registeredInstance.body.id, projectId });
+    const globalBinding = scanned.body.bindings.find(item => item.kind === 'skill' && item.name === 'global-needle')!;
+    const projectBinding = scanned.body.bindings.find(item => item.kind === 'skill' && item.name === 'project-needle')!;
+    expect(globalBinding).toBeDefined();
+    expect(projectBinding).toBeDefined();
+    const globalDetail = await call('GET', `/api/v1/skills/details?bindingId=${encodeURIComponent(globalBinding.id)}`);
+    const projectDetail = await call('GET', `/api/v1/skills/details?bindingId=${encodeURIComponent(projectBinding.id)}`);
+    expect(globalDetail.status, JSON.stringify(globalDetail.body)).toBe(200);
+    expect(projectDetail.status, JSON.stringify(projectDetail.body)).toBe(200);
+    expect(globalDetail.body.body).toContain('GLOBAL_NEEDLE_738');
+    expect(projectDetail.body.body).toContain('PROJECT_NEEDLE_941');
+    const globalSearch = await call('GET', '/api/v1/skills/search?q=GLOBAL_NEEDLE_738');
+    const projectSearch = await call('GET', '/api/v1/skills/search?q=PROJECT_NEEDLE_941');
+    expect(globalSearch.body.matches.some((item: { bindingId: string }) => item.bindingId === globalBinding.id)).toBe(true);
+    expect(projectSearch.body.matches.some((item: { bindingId: string }) => item.bindingId === projectBinding.id)).toBe(true);
+    const availability = await call('GET', `/api/v1/skills/availability?instanceId=${encodeURIComponent(registeredInstance.body.id)}&projectId=${encodeURIComponent(projectId)}&workdir=${encodeURIComponent(projectRoot)}`);
+    expect(availability.status).toBe(200);
+    expect(availability.body.bindings[globalBinding.id]).toMatchObject({ disk: 'present', format: 'valid' });
+    expect(availability.body.bindings[projectBinding.id]).toMatchObject({ disk: 'present', format: 'valid' });
+    await rm(path.join(projectDir, 'SKILL.md'));
+    const missingFileState = await call('GET', `/api/v1/skills/availability?instanceId=${encodeURIComponent(registeredInstance.body.id)}&projectId=${encodeURIComponent(projectId)}`);
+    expect(missingFileState.body.bindings[projectBinding.id]).toMatchObject({ disk: 'missing', format: 'unavailable' });
+  });
+
+  it('rejects a same-home junction that replaces a scanned Skill with an unrelated private directory', async () => {
+    const { instance } = await writableCodex();
+    const skillDir = path.join(home, '.agents', 'skills', 'junction-probe');
+    const privateDir = path.join(home, 'unrelated-private-dir');
+    await mkdir(skillDir, { recursive: true });
+    await mkdir(privateDir, { recursive: true });
+    await writeFile(path.join(skillDir, 'SKILL.md'), '---\nname: junction-probe\ndescription: Scanned skill.\n---\nOriginal content.');
+    await writeFile(path.join(privateDir, 'SKILL.md'), '---\nname: unrelated-private\ndescription: Private.\n---\nPRIVATE_JUNCTION_BODY_763');
+    const scan = await call<Catalog>('POST', '/api/v1/scans', { instanceId: instance.id });
+    const binding = scan.body.bindings.find(item => item.kind === 'skill' && item.name === 'junction-probe')!;
+    expect(binding).toBeDefined();
+    expect(binding.skillRootRealPath).toBe(path.join(home, '.agents', 'skills'));
+    await rm(skillDir, { recursive: true });
+    await symlink(privateDir, skillDir, 'junction');
+    const detail = await call('GET', `/api/v1/skills/details?bindingId=${encodeURIComponent(binding.id)}`);
+    expect(detail.status).toBe(403);
+    expect(JSON.stringify(detail.body)).not.toContain('PRIVATE_JUNCTION_BODY_763');
+    const searchMatches: Array<{ bindingId?: string }> = [];
+    let offset = 0;
+    while (true) {
+      const page = await call('GET', `/api/v1/skills/search?q=PRIVATE_JUNCTION_BODY_763&offset=${offset}`);
+      searchMatches.push(...page.body.matches);
+      if (page.body.nextOffset === null) break;
+      offset = page.body.nextOffset;
+    }
+    expect(searchMatches.some(item => item.bindingId === binding.id)).toBe(false);
+    const availability = await call('GET', `/api/v1/skills/availability?instanceId=${encodeURIComponent(instance.id)}`);
+    expect(availability.body.bindings[binding.id].disk).toBe('unreadable');
+    expect(availability.body.bindings[binding.id].reason).toContain('物理身份');
   });
 
   it('rejects hostile Host and browser Origin even after the server has started', async () => {
@@ -219,6 +395,29 @@ describe('local API with actual network peers and isolated configuration', () =>
     expect((await readFile(binding.sourcePath)).equals(externallyEdited)).toBe(true);
     const operations = (await call<Operation[]>('GET', '/api/v1/operations')).body;
     expect(operations.some(item => item.status === 'conflict')).toBe(true);
+  });
+
+  it.each(['toggle', 'restore'] as const)('rechecks revoked standalone MCP permission before applying a %s plan, including after restart', async action => {
+    const { instance, binding } = await writableCodex();
+    let plan = (await call<ChangePlan>('POST', '/api/v1/plans', { bindingId: binding.id, enabled: false })).body;
+    if (action === 'restore') {
+      const operation = (await call<Operation>('POST', `/api/v1/plans/${plan.id}/apply`, { digest: plan.afterHash })).body;
+      plan = (await call<ChangePlan>('POST', `/api/v1/operations/${operation.id}/restore-plan`, {})).body;
+    }
+    const before = await readFile(binding.sourcePath);
+    const revoked = await call<AgentInstance>('POST', '/api/v1/instances', { agentId: 'codex', configRoot: instance.configRoot, writable: false });
+    expect(revoked.body.writable).toBe(false);
+    await app.close();
+    app = createApp({ dataDir: path.join(directory, 'data'), homeDir: home, discoveryEnv: {} });
+    origin = await app.listen({ host: '127.0.0.1', port: 0 });
+    const session = await call('POST', '/api/v1/session/bootstrap', { ticket: app.agentdeckAuth.issueBootstrapTicket() }, false);
+    cookie = String(session.headers['set-cookie']?.[0]).split(';')[0]!;
+    csrf = String(session.body.csrfToken);
+    const result = await call('POST', `/api/v1/plans/${plan.id}/apply`, { digest: plan.afterHash });
+    expect(result.status).toBe(403);
+    expect(result.body.error).toMatchObject({ code: 'POLICY_LOCKED' });
+    expect(await readFile(binding.sourcePath)).toEqual(before);
+    expect((await call<Operation[]>('GET', '/api/v1/operations')).body.filter(operation => operation.planId === plan.id)).toEqual([]);
   });
 
   it('reinitializes demo from actual state instead of resetting the displayed toggle', async () => {

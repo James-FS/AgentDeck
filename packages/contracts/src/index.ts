@@ -77,6 +77,8 @@ export interface AgentInstance {
   agentId: string;
   name: string;
   configRoot: string;
+  /** User home associated with this configuration root; persisted independently of discovery IDs. */
+  userHomeDir?: string;
   version: string | null;
   executable: string | null;
   discovery: DiscoveryKind;
@@ -176,14 +178,108 @@ export interface Binding {
   mcpService?: { identity: string; kind: 'local-entry' | 'endpoint' | 'package'; location: string;
     packageName?: string; packageVersion?: string | null; launchMode?: string; packageEvidencePath?: string; entryPath?: string;
     configurationIdentity: string; evidencePath: string; reason: string };
+  /** Exact scan root and physical root observed by the adapter; authorizes read-only Skill details. */
+  skillRootPath?: string;
+  skillRootRealPath?: string;
 }
+
+export const ScanOutcomeSchema = z.object({
+  status: z.enum(['succeeded', 'partial', 'failed']),
+  completedAt: z.string(),
+  succeeded: z.number().int().nonnegative(),
+  failures: z.array(z.object({
+    agentId: z.string(),
+    instanceId: z.string().nullable(),
+    projectId: z.string().nullable(),
+    stage: z.enum(['discovery', 'scan']),
+    message: z.string(),
+  })),
+});
+export type ScanOutcome = z.infer<typeof ScanOutcomeSchema>;
 
 export interface Catalog {
   instances: AgentInstance[];
   projects: Project[];
   bindings: Binding[];
   lastScanAt: string | null;
+  /** Latest attempt, including failures; lastScanAt only advances after a fully successful attempt. */
+  lastScan?: ScanOutcome | null;
+  skillSources?: SkillSource[];
 }
+
+export interface SkillSource {
+  id: string;
+  path: string;
+  mode: 'quick' | 'deep';
+  followLinks: boolean;
+  scannedAt: string | null;
+  report: SkillSourceReport | null;
+}
+export interface SkillSourceFinding {
+  logicalPath: string;
+  actualPath: string;
+  name: string;
+  status: 'recognized' | 'candidate' | 'skipped';
+  reason: string;
+  description: string | null;
+}
+export interface SkillSourceReport {
+  status: 'complete' | 'partial' | 'failed';
+  rootPath: string;
+  /** Physical identity captured when this report was produced, for revalidation before reading details. */
+  rootRealPath?: string;
+  candidateCount: number;
+  recognizedCount: number;
+  skippedCount: number;
+  visitedDirectories: number;
+  limits: { maxDepth: number; maxDirectories: number; maxEntriesPerDirectory: number; maxManifestBytes: number; maxFrontmatterBytes: number };
+  truncatedAt: string | null;
+  /** Directory path that can be registered as a new scan root to continue bounded traversal. */
+  continuationPath: string | null;
+  diagnostics: string[];
+  findings: SkillSourceFinding[];
+}
+export const SkillSourceSchema = z.object({
+  id: z.string().min(1), path: z.string().min(1), mode: z.enum(['quick', 'deep']), followLinks: z.boolean(),
+  scannedAt: z.string().nullable(),
+  report: z.object({
+    status: z.enum(['complete', 'partial', 'failed']), rootPath: z.string(), rootRealPath: z.string().optional(),
+    candidateCount: z.number().int().nonnegative(), recognizedCount: z.number().int().nonnegative(),
+    skippedCount: z.number().int().nonnegative(), visitedDirectories: z.number().int().nonnegative(),
+    limits: z.object({ maxDepth: z.number().int().positive(), maxDirectories: z.number().int().positive(),
+      maxEntriesPerDirectory: z.number().int().positive(), maxManifestBytes: z.number().int().positive(),
+      maxFrontmatterBytes: z.number().int().positive() }),
+    truncatedAt: z.string().nullable(), continuationPath: z.string().nullable(), diagnostics: z.array(z.string()),
+    findings: z.array(z.object({ logicalPath: z.string(), actualPath: z.string(), name: z.string(),
+      status: z.enum(['recognized', 'candidate', 'skipped']), reason: z.string(), description: z.string().nullable() })),
+  }).nullable(),
+});
+
+export const SkillDetailsSchema = z.object({
+  name: z.string(), description: z.string().nullable(), author: z.string().nullable(), version: z.string().nullable(),
+  license: z.string().nullable(), environment: z.string().nullable(), invocation: z.string().nullable(),
+  dependencies: z.array(z.string()), supports: z.array(z.string()), body: z.string(),
+  formatStatus: z.enum(['valid', 'invalid']), metadataIssues: z.array(z.string()),
+});
+export type SkillDetails = z.infer<typeof SkillDetailsSchema>;
+export const SkillSearchResponseSchema = z.object({
+  query: z.string(), offset: z.number().int().nonnegative(), pageSize: z.number().int().positive(),
+  examined: z.number().int().nonnegative(), totalCandidates: z.number().int().nonnegative(),
+  nextOffset: z.number().int().nonnegative().nullable(), truncated: z.boolean(), failures: z.number().int().nonnegative(),
+  matches: z.array(z.object({ key: z.string(), bindingId: z.string().optional(), sourceId: z.string().optional(), findingPath: z.string().optional(), name: z.string(), snippet: z.string() })),
+});
+export type SkillSearchResponse = z.infer<typeof SkillSearchResponseSchema>;
+export const SkillFileInspectionSchema = z.object({
+  disk: z.enum(['present', 'missing', 'unreadable', 'configuration-only']),
+  format: z.enum(['valid', 'invalid', 'unavailable']), reason: z.string(), checkedAt: z.string(),
+});
+export const SkillAvailabilityResponseSchema = z.object({
+  checkedAt: z.string(), totalBindings: z.number().int().nonnegative(), inspectedBindings: z.number().int().nonnegative(),
+  totalIndependent: z.number().int().nonnegative(), inspectedIndependent: z.number().int().nonnegative(), truncated: z.boolean(),
+  bindings: z.record(z.string(), SkillFileInspectionSchema),
+  independent: z.array(z.object({ sourceId: z.string(), findingPath: z.string(), name: z.string(), status: z.enum(['present', 'missing', 'unreadable']), format: z.enum(['valid', 'invalid', 'unavailable']), reason: z.string(), bound: z.literal(false) })),
+});
+export type SkillAvailabilityResponse = z.infer<typeof SkillAvailabilityResponseSchema>;
 
 export interface AdapterInfo {
   id: string;
@@ -256,6 +352,11 @@ export const RegisterInstanceSchema = z.object({
 export const RegisterProjectSchema = z.object({
   name: z.string().trim().min(1).max(160, '项目名称不能超过 160 个字符').optional(),
   rootPath: z.string().trim().min(1, '请填写项目根目录'),
+});
+export const RegisterSkillSourceSchema = z.object({
+  path: z.string().trim().min(1, '请填写资源目录'),
+  mode: z.enum(['quick', 'deep']).optional().default('quick'),
+  followLinks: z.boolean().optional().default(false),
 });
 export const ScanRequestSchema = z.object({
   discover: z.boolean().optional().default(false),

@@ -84,8 +84,6 @@ async function scanFallbackMcp(context: ScanContext, home: string, source: 'user
       readOnlyReason: 'ZCode 公共 MCP 回退只读；不连接服务器。' }));
   }
 }
-const discoveredHomes = new Map<string, string>();
-
 /** Desktop Settings -> Skills persists per-SKILL.md overrides in the user CLI config. */
 async function applyDesktopSkillSwitches(root: string, bindings: Binding[], diagnostics: string[]) {
   const file = path.join(root, 'cli', 'config.json');
@@ -134,17 +132,16 @@ export const zcodeAdapter: AgentAdapter = {
   id: 'zcode',
   name: 'ZCode',
   info: {
-    id: 'zcode', name: 'ZCode', description: '只读扫描 ZCode 配置与本地扩展；发现配置不代表已识别桌面或 CLI 客户端。',
+    id: 'zcode', name: 'ZCode', description: 'ZCode 资源扫描与受支持的用户配置开关；发现配置不代表已识别客户端。',
     supportedKinds: ['skill', 'plugin', 'mcp'], writeSupport: ['default supported switches: existing ZCode user config Skill, configured/installed plugin and independent MCP boolean toggles'],
   },
   async discover({ homeDir, env }) {
     const root = expandPath(env.ZCODE_HOME || path.join(homeDir, '.zcode'), homeDir);
     const executable = await findExecutable(env, ['zcode']);
     if (!(await existsDirectory(root)) && !(await existsRegularFile(path.join(root, 'cli', 'config.json'))) && !executable) return [];
-    const found = instance({ agentId: 'zcode', name: 'ZCode', configRoot: root, executable });
+    const found = instance({ agentId: 'zcode', name: 'ZCode', configRoot: root, executable, userHomeDir: homeDir });
     const desktop = await findZCodeDesktopRoot(env, homeDir);
     if (desktop) found.desktopResourceRoot = desktop;
-    discoveredHomes.set(found.id, homeDir);
     return [found];
   },
   async scan(context: ScanContext): Promise<ScanReport> {
@@ -157,12 +154,13 @@ export const zcodeAdapter: AgentAdapter = {
       await scanFile(context, path.join(context.project.rootPath, '.zcode', 'cli', 'config.json'), context.project.rootPath, 'repository', bindings, diagnostics);
     }
 
-    await scanFallbackMcp(context, discoveredHomes.get(context.instance.id) ?? path.dirname(root), 'user', bindings, diagnostics);
+    const userHome = context.instance.userHomeDir ?? path.dirname(root);
+    await scanFallbackMcp(context, userHome, 'user', bindings, diagnostics);
     if (context.project) await scanFallbackMcp(context, '', 'repository', bindings, diagnostics);
 
     const roots: Array<{ path: string; scope: 'user-global' | 'project-directory'; source: 'user' | 'repository'; projectId: string | null }> = [
       { path: path.join(root, 'skills'), scope: 'user-global', source: 'user', projectId: null },
-      { path: path.join(discoveredHomes.get(context.instance.id) ?? path.dirname(root), '.agents', 'skills'), scope: 'user-global', source: 'user', projectId: null },
+      { path: path.join(userHome, '.agents', 'skills'), scope: 'user-global', source: 'user', projectId: null },
     ];
     if (context.project) {
       roots.push({ path: path.join(context.project.rootPath, '.zcode', 'skills'), scope: 'project-directory', source: 'repository', projectId: context.project.id });
@@ -171,7 +169,7 @@ export const zcodeAdapter: AgentAdapter = {
     }
     for (const candidate of roots) {
       const common = candidate.path.includes(`${path.sep}.agents${path.sep}`);
-      const boundary = candidate.projectId === null ? common ? discoveredHomes.get(context.instance.id) ?? path.dirname(root) : root : context.project!.rootPath;
+      const boundary = candidate.projectId === null ? common ? userHome : root : context.project!.rootPath;
       if (!(await isSafePathWithin(boundary, candidate.path))) continue;
       bindings.push(...await scanSkillRoot({
         root: candidate.path, context, scope: candidate.scope, sourceKind: candidate.source,

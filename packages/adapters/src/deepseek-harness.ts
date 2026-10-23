@@ -114,8 +114,9 @@ export const deepSeekHarnessAdapter: AgentAdapter = {
   name: 'DeepSeek Harness',
   info: {
     id: 'deepseek-harness', name: 'DeepSeek Harness',
-    description: '对 DSH profile patch 行与文件系统 Skills 的只读有限扫描；不执行任何表达式。',
-    supportedKinds: ['skill', 'plugin', 'mcp'], writeSupport: [],
+    description: 'DSH profile patch 与 Skill 的静态扫描，以及部分用户插件行开关；不执行表达式。',
+    supportedKinds: ['skill', 'plugin', 'mcp'],
+    writeSupport: ['supported static user cordis.patch.yaml/yml plugin disabled switches; project, protected modules and child MCP remain read-only'],
   },
   async discover({ homeDir, env }) {
     const root = expandPath(env.DSH_HOME || path.join(homeDir, '.dsh'), homeDir);

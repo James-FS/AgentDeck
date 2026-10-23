@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted } from 'vue';
+import { computed, onBeforeUnmount, onMounted } from 'vue';
 import { storeToRefs } from 'pinia';
 import { FolderAdd, InfoFilled, Plus, Refresh, Search } from '@element-plus/icons-vue';
 import { useAppStore } from './store';
@@ -22,9 +22,11 @@ import InstanceFormDrawer from './components/drawers/InstanceFormDrawer.vue';
 import ProjectFormDrawer from './components/drawers/ProjectFormDrawer.vue';
 import PlanDrawer from './components/drawers/PlanDrawer.vue';
 import BindingDrawer from './components/drawers/BindingDrawer.vue';
+import { scanNotice } from './scan-state';
 
 const store = useAppStore();
 const ui = useUiStore();
+const scanWarning = computed(() => store.catalog?.lastScan && store.catalog.lastScan.status !== 'succeeded' ? scanNotice(store.catalog).message : null);
 const { page, drawer, actionBusy, selectedBinding } = storeToRefs(ui);
 const { drawerVisibility, openInstanceForm, openProjectForm } = ui;
 const { activePlan } = usePlanFlow();
@@ -57,6 +59,7 @@ onBeforeUnmount(() => { closeEvents(); });
           <template #actions><template v-if="page === 'instances'"><el-button @click="scan(true, true)" :loading="actionBusy"><el-icon><Search /></el-icon>发现客户端</el-button><el-button type="primary" @click="openInstanceForm"><el-icon><Plus /></el-icon>登记实例</el-button></template><el-button v-if="page === 'projects'" type="primary" @click="openProjectForm"><el-icon><FolderAdd /></el-icon>登记项目</el-button><template v-if="page === 'resources' || page === 'overview'"><el-button @click="scan(false)" :loading="actionBusy"><el-icon><Refresh /></el-icon>重新扫描已登记实例</el-button><el-button type="primary" @click="scan(true, true)" :loading="actionBusy"><el-icon><Search /></el-icon>发现并扫描本机资源</el-button></template></template>
         </PageHeading>
         <div v-if="store.refreshError" class="inline-error"><el-icon><InfoFilled /></el-icon><span>{{ store.refreshError }}</span><el-button text @click="refresh">重试</el-button></div>
+        <el-alert v-if="scanWarning" data-testid="scan-warning" :title="scanWarning" :type="store.catalog?.lastScan?.status === 'failed' ? 'error' : 'warning'" :closable="false" show-icon />
 
         <OverviewPage v-if="page === 'overview'" />
         <ResourcesPage v-else-if="page === 'resources'" />

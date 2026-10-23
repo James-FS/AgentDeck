@@ -8,8 +8,6 @@ import {
   instance, isSafePathWithin, isWithin, mcpTransport, object, report, safeMcpFile, safeTomlFile, scanSingleSkill, scanSkillRoot,
 } from './shared.js';
 
-const discoveredHomes = new Map<string, string>();
-
 function enabledValue(value: unknown): boolean | null {
   const obj = object(value);
   return obj && !Object.hasOwn(obj, 'enabled') ? true : typeof obj?.enabled === 'boolean' ? obj.enabled : null;
@@ -257,7 +255,7 @@ export const codexAdapter: AgentAdapter = {
   id: 'codex',
   name: 'Codex',
   info: {
-    id: 'codex', name: 'Codex', description: '对 Codex 的只读本地发现与有限配置扫描。',
+    id: 'codex', name: 'Codex', description: 'Codex 本地资源发现、有限配置扫描及受限用户配置开关。',
     supportedKinds: ['skill', 'plugin', 'mcp'],
     writeSupport: ['experimental: default supported independent user MCP switches; explicit read-only respected', 'Codex 0.159.2/win32: user config-root Skill overrides and configured local marketplace plugin toggles'],
   },
@@ -267,8 +265,7 @@ export const codexAdapter: AgentAdapter = {
     const hasConfig = await existsRegularFile(path.join(root, 'config.toml'));
     const hasSkills = await existsDirectory(path.join(homeDir, '.agents', 'skills')) || await existsDirectory(path.join(root, 'skills'));
     if (!hasConfig && !hasSkills && !executable) return [];
-    const found = instance({ agentId: 'codex', name: 'Codex', configRoot: root, executable });
-    discoveredHomes.set(found.id, homeDir);
+    const found = instance({ agentId: 'codex', name: 'Codex', configRoot: root, executable, userHomeDir: homeDir });
     return [found];
   },
   async scan(context: ScanContext): Promise<ScanReport> {
@@ -333,7 +330,7 @@ export const codexAdapter: AgentAdapter = {
       await scanCodexPluginCache({ context, configuration: pluginConfigurations, bindings, diagnostics });
     }
 
-    const userHome = discoveredHomes.get(agent.id) ?? path.dirname(agent.configRoot);
+    const userHome = agent.userHomeDir ?? path.dirname(agent.configRoot);
     const roots: Array<{ root: string; boundary: string; scope: 'user-global' | 'project'; source: 'user' | 'repository' | 'builtin' }> = [
       { root: path.join(userHome, '.agents', 'skills'), boundary: userHome, scope: 'user-global', source: 'user' },
       { root: path.join(agent.configRoot, 'skills'), boundary: agent.configRoot, scope: 'user-global', source: 'user' },

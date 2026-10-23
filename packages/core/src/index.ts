@@ -3,8 +3,8 @@ import { mkdir, writeFile, access, mkdtemp, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type {
-  AdapterInfo, AgentAdapter, AgentId, AgentInstance, Binding, Catalog, ClientCompatibilityReport,
-  ClientVersionEvidence, CompatibilityReport, ExecutableIdentity, Project,
+  AdapterInfo, AgentAdapter, AgentId, AgentInstance, Binding, Catalog, ClientCompatibilityReport, SkillSource,
+  ClientVersionEvidence, CompatibilityReport, ExecutableIdentity, Project, ScanOutcome,
 } from '@agentdeck/contracts';
 import {
   inspectExecutable, parseRecognizedVersion, resolvePathExecutable, runVersionCommand, sameExecutable,
@@ -13,6 +13,9 @@ import {
 } from './version-check.js';
 import { buildCapabilityEvidence } from './compatibility.js';
 import { classifyCatalog } from './classification.js';
+import { scanSkillSource, skillSourceId } from './skill-sources.js';
+export { readSkillDetails } from './skill-details.js';
+export { scanSkillSource, skillSourceId } from './skill-sources.js';
 
 type RegisterInstanceInput = { agentId: string; name?: string; configRoot: string; writable?: boolean };
 type RegisterProjectInput = { name?: string; rootPath: string };
@@ -33,6 +36,7 @@ export interface ManagerOptions {
 
 export interface ManagerStore {
   catalog(): Catalog;
+  getMetadata(key: string): string | null;
   setMetadata(key: string, value: string): void;
   putInstance(value: AgentInstance): void;
   getInstance(id: string): AgentInstance | null;
@@ -52,6 +56,7 @@ export class ManagerService {
   readonly versionRunner: VersionCheckRunner;
   readonly platform: NodeJS.Platform;
   private readonly now: () => Date;
+  private readonly skillSourceGenerations = new Map<string, number>();
 
   constructor(options: ManagerOptions) {
     this.store = options.store;
@@ -66,7 +71,59 @@ export class ManagerService {
     this.now = options.now ?? (() => new Date());
   }
 
-  catalog(): Catalog { return classifyCatalog(this.store.catalog()); }
+  catalog(): Catalog {
+    const catalog = this.store.catalog();
+    catalog.skillSources = this.readSkillSources();
+    return classifyCatalog(catalog);
+  }
+
+  private readSkillSources(): SkillSource[] {
+    const storedSources = this.store.getMetadata('skillSources');
+    if (!storedSources) return [];
+    try { const value: unknown = JSON.parse(storedSources); return Array.isArray(value) ? value as SkillSource[] : []; }
+    catch { return []; }
+  }
+  private writeSkillSources(sources: SkillSource[]): void { this.store.setMetadata('skillSources', JSON.stringify(sources)); }
+  private bumpSkillSourceGeneration(id: string): number {
+    const next = (this.skillSourceGenerations.get(id) ?? 0) + 1;
+    this.skillSourceGenerations.set(id, next);
+    return next;
+  }
+
+  async registerSkillSource(input: { path: string; mode?: 'quick' | 'deep'; followLinks?: boolean }): Promise<SkillSource> {
+    const resolved = path.resolve(input.path);
+    const sources = this.readSkillSources();
+    const id = skillSourceId(resolved);
+    const prior = sources.find(item => item.id === id);
+    this.bumpSkillSourceGeneration(id);
+    const source: SkillSource = { id, path: resolved, mode: input.mode ?? 'quick', followLinks: input.followLinks ?? false,
+      scannedAt: prior?.mode === (input.mode ?? 'quick') && prior.followLinks === (input.followLinks ?? false) ? prior.scannedAt : null,
+      report: prior?.mode === (input.mode ?? 'quick') && prior.followLinks === (input.followLinks ?? false) ? prior.report : null };
+    const next = [...sources.filter(item => item.id !== id), source];
+    this.writeSkillSources(next);
+    return this.scanRegisteredSkillSource(id);
+  }
+
+  async scanRegisteredSkillSource(id: string): Promise<SkillSource> {
+    const sources = this.readSkillSources();
+    const source = sources.find(item => item.id === id);
+    if (!source) throw new ManagerError(404, 'SKILL_SOURCE_NOT_FOUND', '所选资源入口未登记。');
+    const generation = this.bumpSkillSourceGeneration(id);
+    const updated: SkillSource = { ...source, scannedAt: this.now().toISOString(), report: await scanSkillSource(source) };
+    const currentSources = this.readSkillSources();
+    const current = currentSources.find(item => item.id === id);
+    if (!current) throw new ManagerError(404, 'SKILL_SOURCE_NOT_FOUND', '扫描期间该资源入口已被移除。');
+    if (this.skillSourceGenerations.get(id) !== generation
+      || current.path !== source.path || current.mode !== source.mode || current.followLinks !== source.followLinks) return current;
+    this.writeSkillSources([...currentSources.filter(item => item.id !== id), updated]);
+    return updated;
+  }
+
+  removeSkillSource(id: string): void {
+    this.bumpSkillSourceGeneration(id);
+    const sources = this.readSkillSources();
+    this.writeSkillSources(sources.filter(item => item.id !== id));
+  }
   adapterInfos(): AdapterInfo[] { return this.adapters.map(adapter => adapter.info); }
 
   async compatibilityReport(): Promise<CompatibilityReport> {
@@ -309,6 +366,7 @@ export class ManagerService {
       agentId: input.agentId,
       name: input.name?.trim() || existing?.name || `${adapter.name} (manual)`,
       configRoot,
+      userHomeDir: existing?.userHomeDir ?? this.homeDir,
       version: existing?.versionEvidence?.version ?? null,
       executable: existing?.executable ?? null,
       ...(existing?.versionEvidence ? { versionEvidence: existing.versionEvidence } : { versionEvidence: null }),
@@ -336,6 +394,20 @@ export class ManagerService {
   }
 
   async scan(input: ScanInput = {}): Promise<Catalog> {
+    const outcome: ScanOutcome = { status: 'succeeded', completedAt: '', succeeded: 0, failures: [] };
+    await this.scanInto(input, outcome);
+    return this.completeScan(outcome);
+  }
+
+  private completeScan(outcome: ScanOutcome): Catalog {
+    outcome.completedAt = this.now().toISOString();
+    outcome.status = outcome.failures.length === 0 ? 'succeeded' : outcome.succeeded > 0 ? 'partial' : 'failed';
+    this.store.setMetadata('lastScan', JSON.stringify(outcome));
+    if (outcome.status === 'succeeded') this.store.setMetadata('lastScanAt', outcome.completedAt);
+    return this.catalog();
+  }
+
+  private async scanInto(input: ScanInput, outcome: ScanOutcome): Promise<void> {
     if (input.discover) {
       const discoveryContext = input.discoveryContext ?? { homeDir: this.homeDir, env: this.env };
       const discovered = await Promise.allSettled(this.adapters.map(adapter => adapter.discover(discoveryContext)));
@@ -343,7 +415,12 @@ export class ManagerService {
       for (let index = 0; index < discovered.length; index += 1) {
         const result = discovered[index];
         const adapter = this.adapters[index];
-        if (!result || !adapter || result.status !== 'fulfilled') continue;
+        if (!result || !adapter) continue;
+        if (result.status !== 'fulfilled') {
+          outcome.failures.push({ agentId: adapter.id, instanceId: null, projectId: null,
+            stage: 'discovery', message: '客户端发现失败；保留已登记实例，未发现的来源可能缺失。' });
+          continue;
+        }
         const seenIds = new Set<string>();
         for (const found of result.value) {
           const configRoot = path.resolve(found.configRoot);
@@ -360,7 +437,8 @@ export class ManagerService {
           if (existing?.discovery === 'manual') {
             // Rediscovery refreshes identity but never revokes a deliberate write opt-in.
             this.store.putInstance({
-              ...existing, version: oldEvidence?.version ?? null, versionEvidence: oldEvidence,
+              ...existing, userHomeDir: path.resolve(discoveryContext.homeDir),
+              version: oldEvidence?.version ?? null, versionEvidence: oldEvidence,
               ...(found.desktopResourceRoot ? { desktopResourceRoot: found.desktopResourceRoot } : {}),
               executable: executable?.path ?? null, checkedAt: this.now().toISOString(), diagnostics,
             });
@@ -370,6 +448,7 @@ export class ManagerService {
             ...found,
             id,
             configRoot: existing?.configRoot ?? configRoot,
+            userHomeDir: path.resolve(discoveryContext.homeDir),
             agentId: adapter.id,
             discovery: 'auto',
             writable: isAgentId(adapter.id),
@@ -396,8 +475,16 @@ export class ManagerService {
     if (input.instanceId && instances.length === 0) throw new ManagerError(404, 'INSTANCE_NOT_FOUND', '所选 Agent 实例未登记。');
 
     for (const instance of instances) {
+      if (!instance.userHomeDir) {
+        instance.userHomeDir = instance.discovery === 'demo' ? this.demoDir : this.homeDir;
+        this.store.putInstance(instance);
+      }
       const adapter = this.adapter(instance.agentId);
-      if (!adapter) continue;
+      if (!adapter) {
+        outcome.failures.push({ agentId: instance.agentId, instanceId: instance.id, projectId: project?.id ?? null,
+          stage: 'scan', message: '此实例的适配器不可用；保留上一次的索引。' });
+        continue;
+      }
       // Upgrade legacy permissions once; preserve subsequent explicit read-only choices.
       if (instance.discovery !== 'demo' && isAgentId(instance.agentId) && (!instance.togglePolicy
         || ['claude-code', 'deepseek-harness'].includes(instance.agentId) && instance.togglePolicy === 'default' && !instance.togglePolicyVersion)) {
@@ -433,19 +520,24 @@ export class ManagerService {
         for (const binding of retained) merged.set(binding.id, binding);
         for (const binding of scanned) merged.set(binding.id, binding);
         this.store.replaceBindings(instance.id, [...merged.values()]);
+        outcome.succeeded += 1;
+        const prior = this.store.getInstance(instance.id);
+        if (prior?.diagnostics.includes('扫描失败；保留上一次的索引。')) {
+          this.store.putInstance({ ...prior, diagnostics: prior.diagnostics.filter(item => item !== '扫描失败；保留上一次的索引。') });
+        }
       } catch {
         // Preserve the last known index when an adapter cannot complete a scan.
         const prior = this.store.getInstance(instance.id);
-        if (prior) this.store.putInstance({ ...prior, diagnostics: [...prior.diagnostics, '扫描失败；保留上一次的索引。'] });
+        if (prior) this.store.putInstance({ ...prior, diagnostics: [...new Set([...prior.diagnostics, '扫描失败；保留上一次的索引。'])] });
+        outcome.failures.push({ agentId: instance.agentId, instanceId: instance.id, projectId: project?.id ?? null,
+          stage: 'scan', message: '扫描失败；保留上一次的索引，当前资源状态可能已过期。' });
       }
     }
     if (input.scanRegisteredProjects && !input.projectId) {
       for (const registeredProject of this.store.catalog().projects) {
-        await this.scan({ projectId: registeredProject.id, ...(input.instanceId ? { instanceId: input.instanceId } : {}) });
+        await this.scanInto({ projectId: registeredProject.id, ...(input.instanceId ? { instanceId: input.instanceId } : {}) }, outcome);
       }
     }
-    this.store.setMetadata('lastScanAt', this.now().toISOString());
-    return this.catalog();
   }
 
   async initializeDemo(): Promise<Catalog> {
@@ -462,7 +554,7 @@ export class ManagerService {
       const configRoot = path.join(this.demoDir, sample.relative);
       const instance: AgentInstance = {
         id: stableId('instance', `demo\0${sample.agentId}`), agentId: sample.agentId,
-        name: sample.name, configRoot, version: null, executable: null,
+        name: sample.name, configRoot, userHomeDir: this.demoDir, version: null, executable: null,
         discovery: 'demo', writable: sample.agentId === 'codex',
         checkedAt: this.now().toISOString(),
         diagnostics: ['隔离演示文件；不触碰真实 Agent 配置。', '客户端版本兼容性为实验性，尚未验收。'],
@@ -478,12 +570,12 @@ export class ManagerService {
     const codex = instances.find(instance => instance.agentId === 'codex')!;
     const codexConfig = path.join(codex.configRoot, 'config.toml');
     await writeIfMissing(codexConfig, '[mcp_servers.agentdeck-demo]\ncommand = "node"\nargs = ["-e", "process.exit(0)"]\nenabled = true\n');
+    const outcome: ScanOutcome = { status: 'succeeded', completedAt: '', succeeded: 0, failures: [] };
     for (const instance of instances) {
-      // Use each adapter's real scanner so demo rows exercise the same discovery rules and IDs as real catalog rows.
-      await this.scan({ instanceId: instance.id });
+      // Aggregate only the isolated demo scans; a later success must not hide an earlier failure.
+      await this.scanInto({ instanceId: instance.id }, outcome);
     }
-    this.store.setMetadata('lastScanAt', this.now().toISOString());
-    return this.catalog();
+    return this.completeScan(outcome);
   }
 
   adapter(id: string): AgentAdapter | undefined { return this.adapters.find(item => item.id === id); }

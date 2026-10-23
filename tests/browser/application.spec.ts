@@ -1,9 +1,10 @@
 import { expect, test } from '@playwright/test';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { copyCatalogFixture, createTestDirectory, removeTestDirectory } from '../helpers';
 import { addPluginCacheFixture } from '../plugin-fixtures';
+import type { Catalog } from '@agentdeck/contracts';
 
 test.describe.serial('built application on loopback', () => {
   let processHandle: ChildProcess;
@@ -11,6 +12,7 @@ test.describe.serial('built application on loopback', () => {
   let startupUrl: string;
   let home: string;
   let projectRoot: string;
+  let sessionCookies: Awaited<ReturnType<import('@playwright/test').BrowserContext['cookies']>> = [];
 
   test.beforeAll(async () => {
     directory = await createTestDirectory('browser-');
@@ -168,8 +170,23 @@ test.describe.serial('built application on loopback', () => {
     await page.getByPlaceholder('例如：D:\\work\\my-project').fill(projectRoot);
     await page.getByRole('dialog').getByRole('button', { name: '登记项目', exact: true }).click();
     await expect(page.getByRole('dialog')).toBeHidden();
+    const projectSkillDirectory = path.join(projectRoot, '.agents', 'skills', 'project-browser-review');
+    await mkdir(projectSkillDirectory, { recursive: true });
+    await writeFile(path.join(projectSkillDirectory, 'SKILL.md'), '---\nname: Project Browser Review\ndescription: Browser availability fixture.\n---\n# Project Browser Review');
     await page.getByRole('button', { name: '扫描项目', exact: true }).click();
     await page.getByRole('button', { name: '资源管理', exact: true }).click();
+    const clientPicker = page.locator('.availability-panel .el-select').nth(0);
+    await clientPicker.click();
+    await page.getByRole('option', { name: /Codex/ }).first().click();
+    const projectPicker = page.locator('.availability-panel .el-select').nth(1);
+    await projectPicker.click();
+    await page.getByRole('option', { name: 'Browser project', exact: true }).click();
+    const projectAvailability = page.locator('.availability-panel').getByText('Project Browser Review', { exact: true }).locator('..');
+    await expect(projectAvailability).toContainText('格式：有效');
+    await expect(projectAvailability).toContainText('配置状态未知');
+    await page.getByLabel('可用性工作目录').fill(path.join(directory, 'outside-project'));
+    await expect(projectAvailability).toContainText('范围不匹配');
+    await page.getByLabel('可用性工作目录').clear();
     await page.getByRole('button', { name: 'MCP', exact: true }).click();
     await search.fill('project-docs');
     const projectMcp = page.getByRole('row').filter({ has: page.getByRole('button', { name: 'project-docs', exact: true }) }).first();
@@ -181,5 +198,114 @@ test.describe.serial('built application on loopback', () => {
     await expect.poll(async () => { const box = await page.getByRole('dialog').boundingBox(); return box ? Math.round(box.x + box.width) : 0; }).toBe(1440);
     await page.screenshot({ path: 'work/browser-proof/project-source-detail.png', fullPage: true });
     expect(errors).toEqual([]);
+    sessionCookies = await page.context().cookies();
+  });
+
+  test('shows partial and failed scan results without a success toast, including after refresh', async ({ page }) => {
+    if (sessionCookies.length) {
+      await page.context().addCookies(sessionCookies);
+      await page.goto(startupUrl.split('#')[0]!);
+    } else await page.goto(startupUrl);
+    await expect(page.getByRole('heading', { name: '资源管理', exact: true })).toBeVisible();
+    const catalog = await page.evaluate(async () => (await fetch('/api/v1/catalog')).json()) as Catalog;
+    const instance = catalog.instances.find(item => item.agentId === 'codex')!;
+    let status: 'partial' | 'failed' = 'partial';
+    const response = (): Catalog => ({ ...catalog, lastScan: {
+      status, completedAt: new Date().toISOString(), succeeded: status === 'partial' ? 1 : 0,
+      failures: [{ agentId: 'codex', instanceId: instance.id, projectId: null, stage: 'scan',
+        message: '扫描失败；保留上一次的索引，当前资源状态可能已过期。' }],
+    } });
+    await page.route('**/api/v1/catalog', route => route.fulfill({ json: response() }));
+    await page.route('**/api/v1/scans', route => route.fulfill({ json: response() }));
+    await page.getByRole('button', { name: '重新扫描已登记实例', exact: true }).click();
+    await expect(page.getByTestId('scan-warning')).toContainText('扫描部分失败');
+    await expect(page.locator('.el-message--warning')).toContainText('当前资源状态可能已过期');
+    await expect(page.locator('.el-message--success')).toHaveCount(0);
+    await page.reload();
+    await expect(page.getByTestId('scan-warning')).toContainText('扫描部分失败');
+    await expect(page.getByRole('row').filter({ hasText: 'agentdeck-demo' })).toBeVisible();
+    status = 'failed';
+    await page.getByRole('button', { name: '重新扫描已登记实例', exact: true }).click();
+    await expect(page.getByTestId('scan-warning')).toContainText('扫描失败');
+    await expect(page.locator('.el-message--error')).toContainText('当前资源状态可能已过期');
+    await expect(page.locator('.el-message--success')).toHaveCount(0);
+  });
+
+  test('registers, deepens, refreshes, and removes an independent Skill source', async ({ page }) => {
+    test.setTimeout(60_000);
+    if (sessionCookies.length) {
+      await page.context().addCookies(sessionCookies);
+      await page.goto(startupUrl.split('#')[0]!);
+    } else await page.goto(startupUrl);
+    await expect(page.getByRole('heading', { name: '资源管理', exact: true })).toBeVisible();
+    const sourceRoot = path.join(directory, 'independent-skill-library');
+    await mkdir(path.join(sourceRoot, 'group', 'real'), { recursive: true });
+    await writeFile(path.join(sourceRoot, 'SKILL.md'), '---\nname: source-root-probe\ndescription: Registered root.\nauthor: Browser tester\n---\n# Searchable preview token\n\n- list item\n\n```js\nconst safe = true;\n```\n\n<script>window.__xss = true</script>\n[unsafe](javascript:alert(1))\n![tracker](https://tracker.example/pixel.png)');
+    await writeFile(path.join(sourceRoot, 'group', 'real', 'SKILL.md'), '---\nname: nested-probe\ndescription: Nested resource.\n---');
+
+    await page.getByRole('textbox', { name: '自定义资源目录' }).fill(sourceRoot);
+    await page.getByRole('button', { name: '登记并扫描', exact: true }).click();
+    const report = page.locator('.source-report').filter({ hasText: sourceRoot }).first();
+    await expect(report).toContainText('扫描部分完成');
+    await expect(report).toContainText('继续深扫截断目录');
+    await expect(page.locator('.source-inventory')).toContainText('source-root-probe');
+    await expect(page.locator('.source-inventory')).not.toContainText('nested-probe');
+    await page.locator('.source-inventory').getByRole('button', { name: '查看详情' }).first().click();
+    await expect(page.getByRole('dialog')).toContainText('Browser tester');
+    await expect(page.getByRole('dialog').getByRole('heading', { name: 'Searchable preview token' })).toBeVisible();
+    await expect(page.getByRole('dialog').locator('#skill-markdown-preview ul')).toContainText('list item');
+    await expect(page.getByRole('dialog').locator('#skill-markdown-preview pre code')).toContainText('const safe = true;');
+    await expect(page.getByRole('dialog').locator('#skill-markdown-preview script')).toHaveCount(0);
+    await expect(page.getByRole('dialog').locator('#skill-markdown-preview img')).toHaveCount(0);
+    await expect(page.getByRole('dialog').locator('#skill-markdown-preview a[href^="javascript:"]')).toHaveCount(0);
+    await expect(page.getByRole('dialog').locator('#skill-markdown-preview')).toContainText('window.__xss = true');
+    await page.getByRole('button', { name: '查看原文' }).click();
+    await expect(page.getByRole('dialog').locator('.markdown-source')).toContainText('<script>');
+    await page.getByRole('button', { name: '显示安全渲染' }).click();
+    await page.getByRole('dialog').getByRole('button', { name: '关闭' }).click();
+    await expect(page.getByRole('dialog')).toBeHidden();
+
+    const paginationRoot = path.join(directory, 'pagination-skill-library');
+    for (let index = 0; index < 30; index += 1) {
+      const skillPath = path.join(paginationRoot, `skill-${String(index).padStart(2, '0')}`);
+      await mkdir(skillPath, { recursive: true });
+      await writeFile(path.join(skillPath, 'SKILL.md'), `---\nname: pagination-skill-${index}\ndescription: Earlier candidate.\n---\nNo match here.`);
+    }
+    const lateSkillPath = path.join(paginationRoot, 'skill-zz-last');
+    await mkdir(lateSkillPath, { recursive: true });
+    await writeFile(path.join(lateSkillPath, 'SKILL.md'), '---\nname: pagination-late-skill\ndescription: Last candidate.\n---\nPAGINATION_NEEDLE_493');
+    await page.getByRole('textbox', { name: '自定义资源目录' }).fill(paginationRoot);
+    const scanDepth = page.getByRole('combobox', { name: '扫描深度' });
+    await scanDepth.press('ArrowDown');
+    await scanDepth.press('Enter');
+    await page.getByRole('button', { name: '登记并扫描', exact: true }).click();
+    await expect(page.locator('.source-inventory')).toContainText('pagination-late-skill');
+    await page.getByPlaceholder('搜索名称或来源路径').fill('PAGINATION_NEEDLE_493');
+    const searchResults = page.locator('.skill-search-results');
+    await expect(searchResults).toContainText('已检查 30/');
+    await expect(searchResults.getByRole('button', { name: '继续搜索后续资源' })).toBeVisible();
+    for (let pageIndex = 0; pageIndex < 5 && !await searchResults.getByText('pagination-late-skill', { exact: true }).count(); pageIndex += 1) {
+      const continueSearch = searchResults.getByRole('button', { name: '继续搜索后续资源' });
+      if (!await continueSearch.count()) break;
+      await continueSearch.click();
+    }
+    await expect(searchResults).toContainText('pagination-late-skill');
+    await expect(searchResults).toContainText('PAGINATION_NEEDLE_493');
+    await page.getByPlaceholder('搜索名称或来源路径').clear();
+
+    await report.getByRole('button', { name: '继续深扫截断目录' }).click();
+    const nestedSourcePath = path.join(sourceRoot, 'group', 'real');
+    const nestedReport = page.locator('.source-report').filter({ has: page.locator('strong').getByText(nestedSourcePath, { exact: true }) });
+    await expect(nestedReport).toContainText('扫描完整');
+    await expect(page.locator('.source-inventory')).toContainText('nested-probe');
+    await mkdir(path.join(nestedSourcePath, 'later'), { recursive: true });
+    await writeFile(path.join(nestedSourcePath, 'later', 'SKILL.md'), '---\nname: later-probe\ndescription: Added after first scan.\n---');
+    await nestedReport.getByRole('button', { name: '重扫' }).click();
+    await expect(page.locator('.source-inventory')).toContainText('later-probe');
+    await page.reload();
+    await expect(page.locator('.source-inventory')).toContainText('later-probe');
+    await page.locator('.source-report').filter({ has: page.locator('strong').getByText(nestedSourcePath, { exact: true }) }).getByRole('button', { name: '移除入口' }).click();
+    await expect(page.locator('.source-report').filter({ has: page.locator('strong').getByText(nestedSourcePath, { exact: true }) })).toHaveCount(0);
+    await expect(page.locator('.source-inventory')).not.toContainText('later-probe');
   });
 });

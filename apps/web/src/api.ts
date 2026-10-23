@@ -11,12 +11,17 @@ import type {
   ExecutableIdentity,
   Operation,
   Project,
+  SkillAvailabilityResponse,
+  SkillSearchResponse,
+  SkillDetails,
   SessionResponse,
 } from '@agentdeck/contracts';
-import { ConfigurationControlSchema, ResourceClassificationSchema } from '@agentdeck/contracts';
+import { ConfigurationControlSchema, ResourceClassificationSchema, ScanOutcomeSchema, SkillAvailabilityResponseSchema, SkillDetailsSchema, SkillSearchResponseSchema, SkillSourceSchema } from '@agentdeck/contracts';
 
 const API = '/api/v1';
 let csrfToken: string | null = null;
+
+export type SkillDetailsResponse = SkillDetails;
 
 export class ApiFailure extends Error {
   readonly status: number;
@@ -76,6 +81,7 @@ function validateCatalog(value: unknown): Catalog {
   const validInstances = value.instances.every((entry) => isRecord(entry)
     && typeof entry.id === 'string' && typeof entry.agentId === 'string' && typeof entry.name === 'string'
     && typeof entry.configRoot === 'string' && typeof entry.writable === 'boolean'
+    && (entry.userHomeDir === undefined || typeof entry.userHomeDir === 'string')
     && typeof entry.discovery === 'string' && Array.isArray(entry.diagnostics)
     && entry.diagnostics.every((item) => typeof item === 'string')
     && typeof entry.checkedAt === 'string'
@@ -136,7 +142,17 @@ function validateCatalog(value: unknown): Catalog {
   if (value.lastScanAt !== null && typeof value.lastScanAt !== 'string') {
     throw new ApiFailure('服务返回的目录扫描时间格式无效。', 200, 'INVALID_RESPONSE');
   }
-  return value as unknown as Catalog;
+  if (value.lastScan !== undefined && value.lastScan !== null && !ScanOutcomeSchema.safeParse(value.lastScan).success) {
+    throw new ApiFailure('服务返回的扫描结果格式无效。', 200, 'INVALID_RESPONSE');
+  }
+  let skillSources: Catalog['skillSources'];
+  if (value.skillSources !== undefined) {
+    if (!Array.isArray(value.skillSources)) throw new ApiFailure('服务返回的自定义 Skill 资源入口格式无效。', 200, 'INVALID_RESPONSE');
+    const parsed = value.skillSources.map(source => SkillSourceSchema.safeParse(source));
+    if (parsed.some(result => !result.success)) throw new ApiFailure('服务返回的自定义 Skill 资源入口或扫描报告格式无效。', 200, 'INVALID_RESPONSE');
+    skillSources = parsed.map(result => result.success ? result.data : null).filter((source): source is NonNullable<typeof source> => source !== null);
+  }
+  return { ...value, ...(skillSources === undefined ? {} : { skillSources }) } as unknown as Catalog;
 }
 
 function validatePlan(value: unknown): ChangePlan {
@@ -216,6 +232,7 @@ function validateCompatibilityReport(value: unknown): CompatibilityReport {
 function validateInstance(value: unknown): AgentInstance {
   if (!isRecord(value) || typeof value.id !== 'string' || typeof value.agentId !== 'string'
     || typeof value.name !== 'string' || typeof value.configRoot !== 'string'
+    || (value.userHomeDir !== undefined && typeof value.userHomeDir !== 'string')
     || (value.version !== null && typeof value.version !== 'string')
     || (value.executable !== null && typeof value.executable !== 'string')
     || !['auto', 'manual', 'demo'].includes(String(value.discovery))
@@ -294,6 +311,35 @@ export const api = {
 
   async registerProject(input: { name?: string; rootPath: string }): Promise<Project> {
     return validateProject(await request<unknown>(`${API}/projects`, { method: 'POST', body: JSON.stringify(input) }));
+  },
+
+  async registerSkillSource(input: { path: string; mode: 'quick' | 'deep'; followLinks: boolean }): Promise<void> {
+    await request<unknown>(`${API}/skill-sources`, { method: 'POST', body: JSON.stringify(input) });
+  },
+  async scanSkillSource(id: string): Promise<void> {
+    await request<unknown>(`${API}/skill-sources/${encodeURIComponent(id)}/scan`, { method: 'POST', body: '{}' });
+  },
+  async removeSkillSource(id: string): Promise<void> {
+    await request<void>(`${API}/skill-sources/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  },
+  async skillDetails(input: { bindingId: string } | { sourceId: string; findingPath: string }, signal?: AbortSignal): Promise<SkillDetailsResponse> {
+    const params = new URLSearchParams(input);
+    const result = await request<unknown>(`${API}/skills/details?${params.toString()}`, { signal });
+    const parsed = SkillDetailsSchema.safeParse(result);
+    if (!parsed.success) throw new ApiFailure('服务返回的 Skill 详情格式无效。', 200, 'INVALID_RESPONSE');
+    return parsed.data;
+  },
+  async searchSkills(query: string, offset = 0, signal?: AbortSignal): Promise<SkillSearchResponse> {
+    const params = new URLSearchParams({ q: query, offset: String(offset) });
+    const parsed = SkillSearchResponseSchema.safeParse(await request<unknown>(`${API}/skills/search?${params}`, { signal }));
+    if (!parsed.success) throw new ApiFailure('服务返回的 Skill 搜索格式无效。', 200, 'INVALID_RESPONSE');
+    return parsed.data;
+  },
+  async skillAvailability(instanceId: string, projectId: string, workdir: string, signal?: AbortSignal): Promise<SkillAvailabilityResponse> {
+    const params = new URLSearchParams({ instanceId, ...(projectId ? { projectId } : {}), ...(workdir ? { workdir } : {}) });
+    const parsed = SkillAvailabilityResponseSchema.safeParse(await request<unknown>(`${API}/skills/availability?${params}`, { signal }));
+    if (!parsed.success) throw new ApiFailure('服务返回的 Skill 可用性格式无效。', 200, 'INVALID_RESPONSE');
+    return parsed.data;
   },
 
   async createPlan(input: { bindingId: string; enabled: boolean }): Promise<ChangePlan> {

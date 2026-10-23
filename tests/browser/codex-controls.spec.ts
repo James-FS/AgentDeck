@@ -75,7 +75,7 @@ test('registers a writable Codex root, checks its version and previews/applies/r
       row = page.getByRole('row').filter({ has: page.getByRole('button', { name, exact: true }) });
       await expect(row.getByRole('button', { name: '计划停用', exact: true })).toBeVisible();
       await row.locator('.resource-detail-link').click();
-      await expect(page.getByRole('dialog').getByText('Codex 单项配置计划可用', { exact: true })).toBeVisible();
+      await expect(page.getByRole('dialog').getByText('单项配置开关可用', { exact: true })).toBeVisible();
       await expect(page.getByRole('dialog').locator('.evidence-head b').filter({ hasText: /^原生配置复读 · 已验证/ })).toBeVisible();
       await page.getByRole('dialog').getByRole('button', { name: /Close|关闭/i }).first().click();
       await expect(page.getByRole('dialog')).toBeHidden();

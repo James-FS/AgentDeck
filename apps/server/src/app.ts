@@ -2,16 +2,17 @@ import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdirSync, existsSync } from 'node:fs';
+import { realpath, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   API_PREFIX, ApplyPlanSchema, BootstrapSchema, CreatePlanSchema,
-  RegisterInstanceSchema, RegisterProjectSchema, ScanRequestSchema, VersionCheckRequestSchema,
+  RegisterInstanceSchema, RegisterProjectSchema, RegisterSkillSourceSchema, ScanRequestSchema, VersionCheckRequestSchema,
   type AgentAdapter, type ApiError, type ChangePlan, type CompatibilityReport,
-  type Operation, type SseEvent,
+  type Binding, type Operation, type SseEvent,
 } from '@agentdeck/contracts';
-import { ManagerError, ManagerService, type ExecutableResolver, type VersionCheckRunner } from '@agentdeck/core';
+import { ManagerError, ManagerService, readSkillDetails, type ExecutableResolver, type VersionCheckRunner } from '@agentdeck/core';
 import { createStore, type AgentDeckStore } from '@agentdeck/storage';
 import { createAdapterRegistry } from '@agentdeck/adapters';
 import * as defaultChangeEngine from '@agentdeck/change-engine';
@@ -90,6 +91,31 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
     ...(options.versionRunner ? { versionRunner: options.versionRunner } : {}),
     ...(options.platform ? { platform: options.platform } : {}),
   });
+  const locateBinding = async (binding: Binding): Promise<{ path: string; root: string } | null> => {
+    if (!binding.skillRootPath || !binding.skillRootRealPath) {
+      // Configuration-only Skill records authorize only the exact scanned config file; its bytes are never used as a manifest.
+      if (!binding.configurationSourcePath || path.resolve(binding.configurationSourcePath) !== path.resolve(binding.sourcePath)) return null;
+      const actualConfig = await realpath(binding.sourcePath);
+      const instance = store.getInstance(binding.instanceId);
+      const project = binding.projectId ? store.getProject(binding.projectId) : null;
+      for (const rootPath of [instance?.configRoot, project?.rootPath].filter((value): value is string => Boolean(value))) {
+        try { const root = await realpath(rootPath); if (isWithin(actualConfig, root)) return { path: actualConfig, root }; }
+        catch { /* missing config roots do not authorize reads */ }
+      }
+      return null;
+    }
+    const root = await realpath(binding.skillRootPath);
+    const sameRoot = process.platform === 'win32' ? root.toLocaleLowerCase('en-US') === binding.skillRootRealPath.toLocaleLowerCase('en-US') : root === binding.skillRootRealPath;
+    if (!sameRoot) return null;
+    const actualPath = await realpath(binding.sourcePath);
+    return isWithin(actualPath, binding.skillRootRealPath) ? { path: actualPath, root: binding.skillRootRealPath } : null;
+  };
+  const locateSourceRoot = async (source: NonNullable<ReturnType<ManagerService['catalog']>['skillSources']>[number]): Promise<string | null> => {
+    if (!source.report?.rootRealPath) return null;
+    const currentRoot = await realpath(source.path);
+    const sameRoot = process.platform === 'win32' ? currentRoot.toLocaleLowerCase('en-US') === source.report.rootRealPath.toLocaleLowerCase('en-US') : currentRoot === source.report.rootRealPath;
+    return sameRoot ? source.report.rootRealPath : null;
+  };
   const engine = options.changeEngine ?? defaultChangeEngine as unknown as ChangeEngine;
   const app = Fastify({ logger: options.logger ?? false, genReqId: () => randomUUID() });
   const tickets = new Map<string, BootstrapTicket>();
@@ -177,6 +203,216 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
   app.get(`${API}/adapters`, async () => manager.adapterInfos());
   app.get(`${API}/compatibility`, async () => manager.compatibilityReport());
   app.get(`${API}/catalog`, async () => manager.catalog());
+  app.get(`${API}/skills/details`, async (request) => {
+    const query = request.query as { bindingId?: string; sourceId?: string; findingPath?: string };
+    let skillDir: string | null = null;
+    let allowedRootReal: string | undefined;
+    if (query.bindingId) {
+      const binding = store.catalog().bindings.find(item => item.id === query.bindingId && item.kind === 'skill');
+      if (!binding) throw new ManagerError(404, 'SKILL_NOT_FOUND', 'Skill 未登记或未扫描发现。');
+      let located: Awaited<ReturnType<typeof locateBinding>>;
+      try { located = await locateBinding(binding); }
+      catch { throw new ManagerError(422, 'SKILL_DETAILS_UNAVAILABLE', '已扫描的 Skill 路径已不存在。'); }
+      if (!located) throw new ManagerError(403, 'SKILL_PATH_UNVERIFIED', 'Skill 路径不在已登记的客户端、用户 home 或项目范围内，详情无法读取。');
+      skillDir = located.path;
+      allowedRootReal = located.root;
+      let isDirectory = false;
+      try { isDirectory = (await stat(skillDir)).isDirectory(); }
+      catch { throw new ManagerError(422, 'SKILL_DETAILS_UNAVAILABLE', '已扫描的 Skill 路径已不存在。'); }
+      if (!isDirectory) return {
+        name: binding.displayName ?? binding.name, description: binding.description || null, author: null, version: null,
+        license: null, environment: null, invocation: null, dependencies: [], supports: [], body: '',
+        metadataIssues: ['此 Skill 记录来自客户端配置项；未关联到已扫描的 SKILL.md 文件，因此正文与扩展元数据不可用。'], formatStatus: 'invalid',
+      };
+    } else if (query.sourceId && query.findingPath) {
+      const source = manager.catalog().skillSources?.find(item => item.id === query.sourceId);
+      const finding = source?.report?.findings.find(item => item.logicalPath === query.findingPath && (item.status === 'recognized' || item.status === 'candidate'));
+      if (!source || !finding) throw new ManagerError(404, 'SKILL_NOT_FOUND', 'Skill 未登记或未被扫描发现。');
+      let rootReal: string | null;
+      try { rootReal = await locateSourceRoot(source); } catch { rootReal = null; }
+      if (!rootReal) throw new ManagerError(403, 'SKILL_PATH_UNVERIFIED', '来源扫描根缺少有效的物理路径证据或已变化，请重新扫描后再查看详情。');
+      const target = path.resolve(path.dirname(finding.logicalPath));
+      let actualDir: string;
+      try { actualDir = await realpath(target); } catch { throw new ManagerError(422, 'SKILL_DETAILS_UNAVAILABLE', '已扫描的 Skill 路径已不存在。'); }
+      if (!isWithin(actualDir, rootReal)) throw new ManagerError(403, 'SKILL_PATH_UNVERIFIED', 'Skill 实际路径超出登记范围。');
+      const sameDirectory = process.platform === 'win32' ? actualDir.toLocaleLowerCase('en-US') === target.toLocaleLowerCase('en-US') : actualDir === target;
+      if (!source.followLinks && !sameDirectory) throw new ManagerError(403, 'SKILL_PATH_UNVERIFIED', '该资源经过符号链接；登记时未开启链接跟随。');
+      skillDir = target;
+      allowedRootReal = rootReal;
+    } else throw new ManagerError(400, 'INVALID_REQUEST', '需要已登记的 bindingId，或 sourceId 与 findingPath。');
+    try { return await readSkillDetails(skillDir, { ...(allowedRootReal ? { allowedRoot: allowedRootReal } : {}) }); }
+    catch (error) { throw new ManagerError(422, 'SKILL_DETAILS_UNAVAILABLE', error instanceof Error ? error.message : '无法读取 Skill 详情。'); }
+  });
+  app.get(`${API}/skills/search`, async (request) => {
+    const query = request.query as { q?: string; offset?: string };
+    const raw = query.q ?? '';
+    const q = raw.trim().slice(0, 120).toLocaleLowerCase();
+    const offset = Number(query.offset ?? '0');
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > 1_000_000) throw new ManagerError(400, 'INVALID_REQUEST', '搜索分页位置无效。');
+    const pageSize = 30;
+    const catalog = manager.catalog();
+    const targets: Array<{ key: string; bindingId?: string; sourceId?: string; findingPath?: string; followLinks?: boolean; dir: string; name: string; description: string }> = [];
+    for (const binding of catalog.bindings.filter(item => item.kind === 'skill')) {
+      targets.push({ key: `binding:${binding.id}`, bindingId: binding.id, dir: binding.sourcePath,
+        name: binding.name, description: binding.description });
+    }
+    for (const source of catalog.skillSources ?? []) for (const finding of source.report?.findings ?? []) {
+      if (finding.status !== 'recognized' && finding.status !== 'candidate') continue;
+      targets.push({ key: `source:${source.id}:${finding.logicalPath}`, sourceId: source.id, findingPath: finding.logicalPath, followLinks: source.followLinks,
+        dir: path.dirname(finding.logicalPath), name: finding.name, description: finding.description ?? '' });
+    }
+    const totalCandidates = targets.length;
+    if (!q) return { query: raw.trim().slice(0, 120), offset, pageSize, examined: 0, totalCandidates,
+      nextOffset: null, truncated: false, failures: 0, matches: [] };
+    const page = targets.slice(offset, offset + pageSize);
+    const matches: Array<{ key: string; bindingId?: string; sourceId?: string; findingPath?: string; name: string; snippet: string }> = [];
+    let searchBytes = 0;
+    let examined = 0;
+    let failures = 0;
+    for (const target of page) {
+      try {
+        let targetPath: string;
+        let allowedRoot: string;
+        if (target.bindingId) {
+          const binding = catalog.bindings.find(item => item.id === target.bindingId);
+          const located = binding ? await locateBinding(binding) : null;
+          if (!located) { failures += 1; examined += 1; continue; }
+          targetPath = located.path; allowedRoot = located.root;
+        } else {
+          const source = (catalog.skillSources ?? []).find(item => item.id === target.sourceId);
+          const root = source ? await locateSourceRoot(source) : null;
+          if (!source || !root) { failures += 1; examined += 1; continue; }
+          const dirReal = await realpath(target.dir);
+          if (!isWithin(dirReal, root)) { failures += 1; examined += 1; continue; }
+          if (!target.followLinks) {
+            const samePath = process.platform === 'win32' ? target.dir.toLocaleLowerCase('en-US') === dirReal.toLocaleLowerCase('en-US') : target.dir === dirReal;
+          if (!samePath) { failures += 1; examined += 1; continue; }
+          }
+          targetPath = dirReal; allowedRoot = root;
+        }
+        let directory = false;
+        try { directory = (await stat(targetPath)).isDirectory(); } catch { failures += 1; examined += 1; continue; }
+        if (directory) {
+          let manifestStat: Awaited<ReturnType<typeof stat>> | null = null;
+          for (const filename of ['SKILL.md', 'skill.md']) {
+            try { manifestStat = await stat(path.join(targetPath, filename)); break; } catch { /* try alternate spelling */ }
+          }
+          if (!manifestStat || !manifestStat.isFile()) { failures += 1; examined += 1; continue; }
+          if (manifestStat.size > 2 * 1024 * 1024) { failures += 1; examined += 1; continue; }
+          if (searchBytes + manifestStat.size > 24 * 1024 * 1024) break;
+          searchBytes += manifestStat.size;
+        } else {
+          // Configuration-only Skill records remain searchable by their indexed description.
+          if (!target.bindingId) { failures += 1; examined += 1; continue; }
+        }
+        let detail: Awaited<ReturnType<typeof readSkillDetails>>;
+        try { detail = await readSkillDetails(targetPath, { includeSupports: false, allowedRoot }); }
+        catch {
+          if (!target.bindingId || directory) { failures += 1; examined += 1; continue; }
+          detail = { name: target.name, description: target.description || null, author: null, version: null, license: null,
+            environment: null, invocation: null, dependencies: [], supports: [], body: '', metadataIssues: [], formatStatus: 'invalid' };
+        }
+        examined += 1;
+        const searchable = `${target.name}\n${detail.name}\n${target.description}\n${detail.description ?? ''}\n${detail.author ?? ''}\n${detail.dependencies.join(' ')}\n${detail.body}`;
+        const haystack = searchable.toLocaleLowerCase();
+        const at = haystack.indexOf(q);
+        if (at >= 0) {
+          const start = Math.max(0, at - 80);
+          matches.push({ key: target.key, ...(target.bindingId ? { bindingId: target.bindingId } : {}), ...(target.sourceId ? { sourceId: target.sourceId, findingPath: target.findingPath } : {}), name: detail.name, snippet: `${start ? '…' : ''}${searchable.slice(start, Math.min(searchable.length, start + 240)).replace(/[\r\n]+/g, ' ')}${searchable.length > start + 240 ? '…' : ''}` });
+        }
+      } catch { failures += 1; examined += 1; }
+    }
+    const nextIndex = offset + examined;
+    const nextOffset = nextIndex < totalCandidates ? nextIndex : null;
+    return { query: raw.trim().slice(0, 120), offset, pageSize, examined, totalCandidates, nextOffset,
+      truncated: nextOffset !== null, failures, matches };
+  });
+  app.get(`${API}/skills/availability`, async (request) => {
+    const query = request.query as { instanceId?: string; projectId?: string; workdir?: string };
+    const instance = query.instanceId ? store.getInstance(query.instanceId) : null;
+    if (!instance) throw new ManagerError(404, 'INSTANCE_NOT_FOUND', '客户端实例未登记。');
+    if (query.projectId && !store.getProject(query.projectId)) throw new ManagerError(404, 'PROJECT_NOT_FOUND', '项目未登记。');
+    const catalog = manager.catalog();
+    const bindings = catalog.bindings.filter(item => item.kind === 'skill' && item.instanceId === instance.id);
+    const independent = (catalog.skillSources ?? []).flatMap(source => (source.report?.findings ?? [])
+      .filter(finding => finding.status === 'recognized' || finding.status === 'candidate')
+      .map(finding => ({ source, finding })));
+    const allTargets = [
+      ...bindings.map(binding => ({ kind: 'binding' as const, binding, dir: binding.sourcePath })),
+      ...independent.map(({ source, finding }) => ({ kind: 'independent' as const, source, finding,
+        dir: path.dirname(finding.logicalPath) })),
+    ];
+    const fileState: Record<string, { disk: 'present' | 'missing' | 'unreadable' | 'configuration-only'; format: 'valid' | 'invalid' | 'unavailable'; reason: string; checkedAt: string }> = {};
+    const independentState: Array<{ sourceId: string; findingPath: string; name: string; status: 'present' | 'missing' | 'unreadable'; format: 'valid' | 'invalid' | 'unavailable'; reason: string; bound: false }> = [];
+    let bytesChecked = 0;
+    let inspectedBindings = 0;
+    let inspectedIndependent = 0;
+    let stop = false;
+    for (const target of allTargets.slice(0, 80)) {
+      if (stop) break;
+      const checkedAt = new Date().toISOString();
+      let disk: 'present' | 'missing' | 'unreadable' | 'configuration-only' = 'missing';
+      let format: 'valid' | 'invalid' | 'unavailable' = 'unavailable';
+      let reason = '';
+      try {
+        let actual: string;
+        let allowedRoot: string;
+        if (target.kind === 'binding') {
+          const located = await locateBinding(target.binding);
+          if (!located) throw new Error('扫描时记录的 Skill 根路径已改变或缺少物理身份，请重新扫描。');
+          actual = located.path; allowedRoot = located.root;
+        } else {
+          const root = await locateSourceRoot(target.source);
+          if (!root) throw new Error('登记来源的扫描根已改变或缺少物理身份，请重新扫描。');
+          actual = await realpath(target.dir);
+          if (!isWithin(actual, root)) throw new Error('Skill 实际路径超出扫描时的资源目录。');
+          allowedRoot = root;
+        }
+        if (target.kind === 'independent' && !target.source.followLinks) {
+          const samePath = process.platform === 'win32' ? actual.toLocaleLowerCase('en-US') === target.dir.toLocaleLowerCase('en-US') : actual === target.dir;
+          if (!samePath) throw new Error('登记来源未启用符号链接跟随。');
+        }
+        const targetStat = await stat(actual);
+        if (!targetStat.isDirectory()) {
+          disk = 'configuration-only';
+          reason = '扫描记录指向配置文件，没有关联到 SKILL.md manifest。';
+        } else {
+          let manifest: Awaited<ReturnType<typeof stat>> | null = null;
+          for (const filename of ['SKILL.md', 'skill.md']) { try { manifest = await stat(path.join(actual, filename)); break; } catch { /* alternate case */ } }
+          if (!manifest) { disk = 'missing'; reason = '当前目录中未找到 SKILL.md。'; }
+          else if (manifest.size > 2 * 1024 * 1024) { disk = 'unreadable'; reason = 'SKILL.md 超过 2 MiB 读取上限。'; }
+          else if (bytesChecked + manifest.size > 24 * 1024 * 1024) { stop = true; break; }
+          else {
+            bytesChecked += manifest.size;
+            disk = 'present';
+            try {
+              const detail = await readSkillDetails(actual, { includeSupports: false, allowedRoot });
+              format = detail.formatStatus;
+              reason = detail.metadataIssues.join('；') || (format === 'valid' ? '当前 manifest 格式有效。' : '当前 manifest 格式无效。');
+            } catch (error) {
+              disk = 'unreadable';
+              reason = error instanceof Error ? error.message : '无法读取当前 manifest。';
+            }
+          }
+        }
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        disk = code === 'ENOENT' || code === 'ENOTDIR' ? 'missing' : 'unreadable';
+        reason = error instanceof Error ? error.message : '无法检查当前路径。';
+      }
+      if (target.kind === 'binding') {
+        fileState[target.binding.id] = { disk, format, reason, checkedAt };
+        inspectedBindings += 1;
+      } else {
+        independentState.push({ sourceId: target.source.id, findingPath: target.finding.logicalPath,
+          name: target.finding.name, status: disk === 'present' ? 'present' : disk === 'missing' ? 'missing' : 'unreadable', format, reason, bound: false });
+        inspectedIndependent += 1;
+      }
+    }
+    return { checkedAt: new Date().toISOString(), totalBindings: bindings.length, inspectedBindings,
+      totalIndependent: independent.length, inspectedIndependent, truncated: inspectedBindings + inspectedIndependent < allTargets.length,
+      bindings: fileState, independent: independentState };
+  });
   app.post(`${API}/instances`, async (request, reply) => {
     const input = RegisterInstanceSchema.safeParse(request.body);
     if (!input.success) throw new ManagerError(400, 'INVALID_REQUEST', input.error.issues[0]?.message ?? '实例登记请求无效。');
@@ -200,6 +436,26 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
     reply.code(201);
     app.agentdeckEvents.publish({ type: 'catalog.changed', payload: { kind: 'project', id: result.id } });
     return result;
+  });
+  app.post(`${API}/skill-sources`, async (request, reply) => {
+    const input = RegisterSkillSourceSchema.safeParse(request.body);
+    if (!input.success) throw new ManagerError(400, 'INVALID_REQUEST', input.error.issues[0]?.message ?? '资源入口登记请求无效。');
+    const source = await manager.registerSkillSource(input.data);
+    reply.code(201);
+    app.agentdeckEvents.publish({ type: 'catalog.changed', payload: { kind: 'skill-source', id: source.id } });
+    return source;
+  });
+  app.post(`${API}/skill-sources/:id/scan`, async (request) => {
+    const { id } = request.params as { id: string };
+    const source = await manager.scanRegisteredSkillSource(id);
+    app.agentdeckEvents.publish({ type: 'catalog.changed', payload: { kind: 'skill-source-scan', id } });
+    return source;
+  });
+  app.delete(`${API}/skill-sources/:id`, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    manager.removeSkillSource(id);
+    reply.code(204);
+    app.agentdeckEvents.publish({ type: 'catalog.changed', payload: { kind: 'skill-source-removed', id } });
   });
   app.post(`${API}/scans`, async (request) => {
     const input = ScanRequestSchema.safeParse(request.body ?? {});
@@ -313,6 +569,21 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
       throw new ManagerError(410, 'PLAN_EXPIRED', '变更计划已过期；请基于当前配置重新创建计划。');
     }
     const controlledTarget = (stored.privateData as defaultChangeEngine.PreparedChange).private?.target;
+    if (!controlledTarget) {
+      await manager.scan({ instanceId: stored.dto.instanceId });
+      const currentInstance = store.getInstance(stored.dto.instanceId);
+      const currentBinding = store.getBinding(stored.dto.bindingId);
+      const isolatedDemo = currentInstance?.discovery === 'demo' && currentInstance.agentId === 'codex'
+        && currentBinding?.name === 'agentdeck-demo' && isWithin(currentInstance.configRoot, manager.demoDir);
+      const standaloneMcp = currentBinding?.kind === 'mcp' && currentBinding.parentId === null
+        && currentBinding.projectId === null && currentBinding.scope === 'native' && currentBinding.sourceKind === 'user';
+      if (!currentInstance || currentInstance.agentId !== 'codex' || !currentInstance.writable || !currentBinding?.writable
+        || !standaloneMcp || currentInstance.discovery === 'demo' && !isolatedDemo
+        || path.resolve(stored.dto.targetPath) !== path.resolve(currentBinding.sourcePath)
+        || !isWithin(stored.dto.targetPath, currentInstance.configRoot)) {
+        throw new ManagerError(403, 'POLICY_LOCKED', '独立 MCP 的启停许可或配置位置已变化，请重新创建计划。');
+      }
+    }
     if (controlledTarget?.kind === 'json' || controlledTarget?.kind === 'dsh-yaml') {
       await manager.scan({ instanceId: stored.dto.instanceId });
       const currentInstance = store.getInstance(stored.dto.instanceId);

@@ -486,29 +486,27 @@ function samePath(left: string, right: string): boolean {
   return process.platform === 'win32' ? a.toLocaleLowerCase('en-US') === b.toLocaleLowerCase('en-US') : a === b;
 }
 
-const discoveredHomes = new Map<string, string>();
-
 export const claudeCodeAdapter: AgentAdapter = {
   id: 'claude-code',
   name: 'Claude Code',
   info: {
-    id: 'claude-code', name: 'Claude Code', description: '对 Claude Code Skills、插件元数据与 MCP 配置的只读有限扫描。',
-    supportedKinds: ['skill', 'plugin', 'mcp'], writeSupport: [],
+    id: 'claude-code', name: 'Claude Code', description: 'Claude Code 资源扫描与部分用户插件开关；Skill、MCP 和项目配置保持只读。',
+    supportedKinds: ['skill', 'plugin', 'mcp'],
+    writeSupport: ['supported user plugin identity switches in existing settings.json; project, synced and plugin components remain read-only'],
   },
   async discover({ homeDir, env }): Promise<AgentInstance[]> {
     const root = expandPath(env.CLAUDE_CONFIG_DIR || path.join(homeDir, '.claude'), homeDir);
     const executable = await findExecutable(env, ['claude']);
     const hasState = await existsDirectory(root) || await existsRegularFile(path.join(homeDir, '.claude.json'));
     if (!hasState && !executable) return [];
-    const found = instance({ agentId: 'claude-code', name: 'Claude Code', configRoot: root, executable });
-    discoveredHomes.set(found.id, homeDir);
+    const found = instance({ agentId: 'claude-code', name: 'Claude Code', configRoot: root, executable, userHomeDir: homeDir });
     return [found];
   },
   async scan(context: ScanContext): Promise<ScanReport> {
     const bindings: Binding[] = [];
     const diagnostics: string[] = [];
     const root = context.instance.configRoot;
-    const homeDir = discoveredHomes.get(context.instance.id) ?? path.dirname(root);
+    const homeDir = context.instance.userHomeDir ?? path.dirname(root);
     const globalSkillRoots = [path.join(root, 'skills')];
     const projectSkillRoots = context.project ? [
       path.join(context.project.rootPath, '.claude', 'skills'),
