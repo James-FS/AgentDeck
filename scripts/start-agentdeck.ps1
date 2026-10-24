@@ -1,4 +1,5 @@
-﻿$ErrorActionPreference = 'Stop'
+﻿param([switch]$Rebuild)
+$ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $OutputEncoding = [Console]::OutputEncoding
 
@@ -19,13 +20,11 @@ try {
     throw '未找到 pnpm。请先运行 npm install -g pnpm@11.22.0，再双击启动。'
   }
 
-  Write-Host '[1/3] 检查并同步项目依赖...'
-  & $pnpmCommand.Source install --frozen-lockfile --prefer-offline
-  if ($LASTEXITCODE -ne 0) { throw '依赖同步失败，请查看上方错误。' }
-
-  Write-Host '[2/3] 构建 AgentDeck...'
-  & $pnpmCommand.Source build
-  if ($LASTEXITCODE -ne 0) { throw '项目构建失败，请查看上方错误。' }
+  Write-Host '[1/2] 校验依赖与构建指纹...'
+  $prepareArguments = @((Join-Path $PSScriptRoot 'prepare-startup.mjs'))
+  if ($Rebuild) { $prepareArguments += '--rebuild' }
+  & $nodeCommand.Source @prepareArguments
+  if ($LASTEXITCODE -ne 0) { throw '依赖或构建校验失败，未启动旧产物。请查看上方错误。' }
 
   $env:NODE_ENV = 'production'
   # Port zero delegates selection to Windows, including its port exclusion rules.
@@ -33,7 +32,7 @@ try {
   if ([string]::IsNullOrWhiteSpace($env:AGENTDECK_OPEN_BROWSER)) {
     $env:AGENTDECK_OPEN_BROWSER = '1'
   }
-  Write-Host '[3/3] 启动本机服务，稍后会自动打开浏览器。'
+  Write-Host '[2/2] 启动本机服务，稍后会自动打开浏览器。'
   if ($env:PORT -eq '0') {
     Write-Host '由系统自动选择可用端口；连接地址将显示在下方。'
   } else {
