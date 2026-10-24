@@ -1,18 +1,20 @@
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import fastifyStatic from '@fastify/static';
-import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdirSync, existsSync } from 'node:fs';
-import { realpath, stat } from 'node:fs/promises';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { mkdirSync, existsSync, watch as fsWatch, type FSWatcher } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { realpath, stat, readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   API_PREFIX, ApplyPlanSchema, BootstrapSchema, CreatePlanSchema,
-  RegisterInstanceSchema, RegisterProjectSchema, RegisterSkillSourceSchema, ScanRequestSchema, VersionCheckRequestSchema,
+  RegisterInstanceSchema, RegisterProjectSchema, RegisterSkillSourceSchema, ResourcePreferencesSchema, ResourceReferenceSchema, ScanRequestSchema,
+  SkillCompareRequestSchema, SkillSourceScanSchema, SkillSourceWatchSchema, VersionCheckRequestSchema,
   type AgentAdapter, type ApiError, type ChangePlan, type CompatibilityReport,
   type Binding, type Operation, type SseEvent,
 } from '@agentdeck/contracts';
-import { ManagerError, ManagerService, readSkillDetails, type ExecutableResolver, type VersionCheckRunner } from '@agentdeck/core';
+import { ManagerError, ManagerService, readSkillDetails, scanSkillSource, type ExecutableResolver, type VersionCheckRunner } from '@agentdeck/core';
 import { createStore, type AgentDeckStore } from '@agentdeck/storage';
 import { createAdapterRegistry } from '@agentdeck/adapters';
 import * as defaultChangeEngine from '@agentdeck/change-engine';
@@ -60,6 +62,11 @@ export interface AppOptions {
   platform?: NodeJS.Platform;
   closeStoreOnClose?: boolean;
   logger?: boolean;
+  openDirectory?: (directory: string) => Promise<void>;
+  scheduleTimeout?: (callback: () => void, delayMs: number) => NodeJS.Timeout;
+  clearScheduledTimeout?: (timer: NodeJS.Timeout) => void;
+  watchDirectory?: typeof fsWatch;
+  skillSourceScanner?: typeof scanSkillSource;
 }
 
 interface BootstrapTicket { expiresAt: number }
@@ -90,6 +97,7 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
     ...(options.executableResolver ? { executableResolver: options.executableResolver } : {}),
     ...(options.versionRunner ? { versionRunner: options.versionRunner } : {}),
     ...(options.platform ? { platform: options.platform } : {}),
+    ...(options.skillSourceScanner ? { skillSourceScanner: options.skillSourceScanner } : {}),
   });
   const locateBinding = async (binding: Binding): Promise<{ path: string; root: string } | null> => {
     if (!binding.skillRootPath || !binding.skillRootRealPath) {
@@ -110,11 +118,93 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
     const actualPath = await realpath(binding.sourcePath);
     return isWithin(actualPath, binding.skillRootRealPath) ? { path: actualPath, root: binding.skillRootRealPath } : null;
   };
+  const locateTrustedDirectory = async (binding: Binding): Promise<string | null> => {
+    if (binding.skillRootPath && binding.skillRootRealPath) {
+      const located = await locateBinding(binding);
+      if (!located) return null;
+      const info = await stat(located.path);
+      return info.isDirectory() ? located.path : path.dirname(located.path);
+    }
+    const instance = store.getInstance(binding.instanceId);
+    const project = binding.projectId ? store.getProject(binding.projectId) : null;
+    if (!instance && !project) return null;
+    if (binding.configurationSourcePath && path.resolve(binding.configurationSourcePath) === path.resolve(binding.sourcePath)) {
+      const located = await locateBinding(binding);
+      return located ? path.dirname(located.path) : null;
+    }
+    const parent = binding.kind === 'plugin' ? binding : binding.parentId ? store.getBinding(binding.parentId) : null;
+    if (parent?.kind === 'plugin') {
+      const rootPath = project?.rootPath ?? instance!.configRoot;
+      const rootReal = await realpath(rootPath);
+      const logical = path.resolve(parent.sourcePath);
+      const info = await stat(logical);
+      let packageLogical = logical;
+      let packageActual = await realpath(logical);
+      if (info.isFile()) {
+        const suffixes = [path.join('.codex-plugin', 'plugin.json'), path.join('.claude-plugin', 'plugin.json'), path.join('.zcode-plugin', 'plugin.json')];
+        const suffix = suffixes.find(item => logical.toLowerCase().endsWith(path.sep + item.toLowerCase()));
+        if (!suffix) return null;
+        packageLogical = path.resolve(logical.slice(0, -suffix.length - 1));
+        packageActual = await realpath(packageLogical);
+      }
+      const relativeFromRoot = path.relative(path.resolve(rootPath), packageLogical);
+      if (relativeFromRoot === '..' || relativeFromRoot.startsWith(`..${path.sep}`) || path.isAbsolute(relativeFromRoot)) return null;
+      const expectedPhysical = path.resolve(rootReal, relativeFromRoot);
+      if (!samePath(packageActual, expectedPhysical) || !isWithin(packageActual, rootReal)) return null;
+      if (parent.origin === 'cache') {
+        if (!parent.pluginId || !parent.marketplace || !parent.pluginVersion || !info.isFile()) return null;
+        const pluginFolder = parent.pluginId.split('@')[0];
+        if (!pluginFolder) return null;
+        let inCache = false;
+        for (const cacheLogical of [path.join(rootPath, 'plugins', 'cache'), path.join(rootPath, 'cli', 'plugins', 'cache')]) {
+          try {
+            const cacheReal = await realpath(cacheLogical);
+            const rel = path.relative(cacheReal, packageActual);
+            const parts = rel.split(path.sep);
+            if (rel && !rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel)
+              && parts.length === 3 && parts[0] === parent.marketplace && parts[1] === pluginFolder && parts[2] === parent.pluginVersion) {
+              inCache = true; break;
+            }
+          } catch { /* this adapter has no cache at this location */ }
+        }
+        if (!inCache) return null;
+      }
+      const packageInfo = await stat(packageActual);
+      return packageInfo.isDirectory() ? packageActual : null;
+    }
+    const rootPath = project?.rootPath ?? instance?.configRoot;
+    if (!rootPath) return null;
+    const rootReal = await realpath(rootPath);
+    const logical = path.resolve(binding.sourcePath);
+    const actual = await realpath(logical);
+    const relative = path.relative(path.resolve(rootPath), logical);
+    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return null;
+    if (!samePath(actual, path.resolve(rootReal, relative)) || !isWithin(actual, rootReal)) return null;
+    const info = await stat(actual);
+    return info.isDirectory() ? actual : path.dirname(actual);
+  };
   const locateSourceRoot = async (source: NonNullable<ReturnType<ManagerService['catalog']>['skillSources']>[number]): Promise<string | null> => {
     if (!source.report?.rootRealPath) return null;
     const currentRoot = await realpath(source.path);
     const sameRoot = process.platform === 'win32' ? currentRoot.toLocaleLowerCase('en-US') === source.report.rootRealPath.toLocaleLowerCase('en-US') : currentRoot === source.report.rootRealPath;
     return sameRoot ? source.report.rootRealPath : null;
+  };
+  const locateSourceFinding = async (sourceId: string, findingPath: string, requireRecognized = false) => {
+    const source = manager.catalog().skillSources?.find(item => item.id === sourceId);
+    const finding = source?.report?.findings.find(item => item.logicalPath === findingPath
+      && (requireRecognized ? item.status === 'recognized' : item.status === 'recognized' || item.status === 'candidate'));
+    if (!source || !finding || !source.report?.rootRealPath) return null;
+    const root = await locateSourceRoot(source);
+    if (!root) return null;
+    const logicalDir = path.resolve(path.dirname(finding.logicalPath));
+    const actualDir = await realpath(logicalDir);
+    const actualManifest = await realpath(finding.logicalPath);
+    if (!isWithin(actualDir, root) || !isWithin(actualManifest, root)
+      || !samePath(actualManifest, path.resolve(finding.actualPath))) return null;
+    if (!source.followLinks && !samePath(actualDir, logicalDir)) return null;
+    const info = await stat(actualManifest);
+    if (!info.isFile() || info.size > 2 * 1024 * 1024) return null;
+    return { source, finding, root, directory: actualDir, manifest: actualManifest };
   };
   const engine = options.changeEngine ?? defaultChangeEngine as unknown as ChangeEngine;
   const app = Fastify({ logger: options.logger ?? false, genReqId: () => randomUUID() });
@@ -122,6 +212,18 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
   const sessions = new Map<string, LocalSession>();
   const listeners = new Set<(event: SseEvent) => void>();
   const streamResponses = new Set<import('node:http').ServerResponse>();
+  const scheduleTimeout = options.scheduleTimeout ?? ((callback, delayMs) => setTimeout(callback, delayMs));
+  const clearScheduledTimeout = options.clearScheduledTimeout ?? clearTimeout;
+  const watchDirectory = options.watchDirectory ?? fsWatch;
+  const sourceWatches = new Map<string, { watcher: FSWatcher; timer: NodeJS.Timeout | null; running: Promise<void> | null; dirty: boolean; rootReal: string }>();
+  const sourceWatchGenerations = new Map<string, number>();
+  const bumpSourceWatchGeneration = (id: string) => {
+    const generation = (sourceWatchGenerations.get(id) ?? 0) + 1;
+    sourceWatchGenerations.set(id, generation);
+    return generation;
+  };
+  const activeWatcherTasks = new Set<Promise<void>>();
+  let shuttingDown = false;
   let revision = Number(store.getMetadata('eventRevision') ?? 0);
   let resolvedPort = options.port ?? 0;
 
@@ -144,6 +246,160 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
       return event;
     },
   });
+
+  const publishSourceWatch = (id: string) => app.agentdeckEvents.publish({ type: 'catalog.changed', payload: { kind: 'skill-source-watch', id } });
+  const stopSourceWatch = (id: string) => {
+    bumpSourceWatchGeneration(id);
+    const current = sourceWatches.get(id);
+    if (!current) return;
+    if (current.timer) clearScheduledTimeout(current.timer);
+    current.watcher.close();
+    sourceWatches.delete(id);
+  };
+  const startSourceWatch = async (id: string): Promise<void> => {
+    if (shuttingDown) return;
+    if (sourceWatches.has(id)) return;
+    const source = manager.catalog().skillSources?.find(item => item.id === id);
+    if (!source?.watchEnabled) return;
+    const expectedRoot = source.report?.rootRealPath;
+    if (!expectedRoot) {
+      manager.updateSkillSource(id, { watchStatus: 'root-changed', watchError: '缺少扫描时的目录物理身份；请手动重扫后再开启监听。' });
+      publishSourceWatch(id); return;
+    }
+    let rootReal: string;
+    try { rootReal = await realpath(source.path); if (!(await stat(source.path)).isDirectory()) throw new Error(); }
+    catch {
+      manager.updateSkillSource(id, { watchStatus: 'root-changed', watchError: '登记目录不存在或已被替换；请重新登记或手动重扫。' });
+      publishSourceWatch(id); return;
+    }
+    if (!samePath(rootReal, expectedRoot)) {
+      manager.updateSkillSource(id, { watchStatus: 'root-changed', watchError: '登记目录物理位置已变化；请手动重扫后重新开启监听。' });
+      publishSourceWatch(id); return;
+    }
+    rootReal = expectedRoot;
+    if (shuttingDown) return;
+    try {
+      bumpSourceWatchGeneration(id);
+      const watcher = watchDirectory(source.path, { recursive: true }, () => {
+        if (shuttingDown) return;
+        const current = sourceWatches.get(id);
+        if (!current) return;
+        current.dirty = true;
+        if (current.timer) clearScheduledTimeout(current.timer);
+        current.timer = scheduleTimeout(() => {
+          current.timer = null;
+          if (shuttingDown || current.running) return;
+          const task = (async () => {
+            try {
+              const currentRoot = await realpath(source.path);
+              if (!samePath(currentRoot, current.rootReal)) {
+                stopSourceWatch(id);
+                manager.updateSkillSource(id, { watchStatus: 'root-changed', watchError: '登记目录物理位置已变化；监听已停止。' });
+                publishSourceWatch(id); return;
+              }
+              do {
+                current.dirty = false;
+                const beforeScan = manager.catalog().skillSources?.find(item => item.id === id);
+                if (!beforeScan) return;
+                if (!beforeScan.watchEnabled) {
+                  manager.updateSkillSource(id, { watchStatus: 'disabled', watchError: null });
+                  return;
+                }
+                const scanResult = await manager.scanRegisteredSkillSource(id, { expectedRootRealPath: current.rootReal });
+                if (shuttingDown) return;
+                const afterScanRoot = await realpath(source.path).catch(() => '');
+                if (!samePath(afterScanRoot, current.rootReal) || !samePath(scanResult.report?.rootRealPath ?? '', current.rootReal)) {
+                  stopSourceWatch(id);
+                  manager.updateSkillSource(id, { watchStatus: 'root-changed', watchError: '扫描期间登记目录物理位置已变化；监听已停止。' });
+                  publishSourceWatch(id); return;
+                }
+                const latest = manager.catalog().skillSources?.find(item => item.id === id);
+                if (!latest) return;
+                if (!latest.watchEnabled) {
+                  manager.updateSkillSource(id, { watchStatus: 'disabled', watchError: null });
+                  return;
+                }
+                app.agentdeckEvents.publish({ type: 'catalog.changed', payload: { kind: 'skill-source-scan', id, source: 'watcher' } });
+                if (scanResult.report?.status === 'failed') {
+                  manager.updateSkillSource(id, { watchStatus: 'error', watchError: scanResult.report.diagnostics[0] ?? '监听扫描失败。' });
+                  publishSourceWatch(id); return;
+                }
+              } while (current.dirty);
+              if (manager.catalog().skillSources?.some(item => item.id === id && item.watchEnabled)) {
+                manager.updateSkillSource(id, { watchStatus: 'watching', watchError: null });
+              }
+            } catch (error) {
+              if (shuttingDown) return;
+              const latest = manager.catalog().skillSources?.find(item => item.id === id);
+              if (!latest) return;
+              if (!latest.watchEnabled) {
+                manager.updateSkillSource(id, { watchStatus: 'disabled', watchError: null });
+                return;
+              }
+              let rootChanged = false;
+              try { rootChanged = !samePath(await realpath(source.path), current.rootReal); } catch { rootChanged = true; }
+              if (rootChanged) stopSourceWatch(id);
+              manager.updateSkillSource(id, { watchStatus: rootChanged ? 'root-changed' : 'error', watchError: rootChanged
+                ? '登记目录不存在或物理位置已变化；监听已停止。'
+                : error instanceof Error ? error.message.slice(0, 240) : '监听扫描失败。' });
+              publishSourceWatch(id);
+            }
+          })();
+          current.running = task;
+          activeWatcherTasks.add(task);
+          void task.then(() => {
+            if (current.running === task) current.running = null;
+            activeWatcherTasks.delete(task);
+          }, () => {
+            if (current.running === task) current.running = null;
+            activeWatcherTasks.delete(task);
+          });
+        }, 300);
+          if (typeof current.timer?.unref === 'function') current.timer.unref();
+      });
+      watcher.on('error', error => {
+        stopSourceWatch(id);
+        if (shuttingDown) return;
+        const errorGeneration = sourceWatchGenerations.get(id);
+        const task = (async () => {
+          try {
+            if (shuttingDown) return;
+            const source = manager.catalog().skillSources?.find(item => item.id === id);
+            if (!source) return;
+            let rootChanged = false;
+            try { rootChanged = !samePath(await realpath(source.path), rootReal); } catch { rootChanged = true; }
+            if (shuttingDown || sourceWatchGenerations.get(id) !== errorGeneration) return;
+            const latest = manager.catalog().skillSources?.find(item => item.id === id);
+            if (!latest || !latest.watchEnabled) return;
+            manager.updateSkillSource(id, { watchStatus: rootChanged ? 'root-changed' : 'error',
+              watchError: rootChanged ? '登记目录不存在或物理位置已变化；监听已停止。' : error.message.slice(0, 240) });
+            publishSourceWatch(id);
+          } catch (taskError) {
+            if (shuttingDown || sourceWatchGenerations.get(id) !== errorGeneration) return;
+            const latest = manager.catalog().skillSources?.find(item => item.id === id);
+            if (!latest || !latest.watchEnabled) return;
+            try {
+              manager.updateSkillSource(id, { watchStatus: 'error', watchError: taskError instanceof Error ? taskError.message.slice(0, 240) : '监听状态更新失败。' });
+              publishSourceWatch(id);
+            } catch { /* A source removal or shutdown can race with error reporting. */ }
+          }
+        })();
+        activeWatcherTasks.add(task);
+        void task.then(() => activeWatcherTasks.delete(task), () => activeWatcherTasks.delete(task));
+      });
+      sourceWatches.set(id, { watcher, timer: null, running: null, dirty: false, rootReal });
+      manager.updateSkillSource(id, { watchStatus: 'watching', watchError: null });
+      publishSourceWatch(id);
+    } catch (error) {
+      manager.updateSkillSource(id, { watchStatus: 'unsupported', watchError: error instanceof Error ? error.message.slice(0, 240) : '当前平台不支持递归目录监听；可手动重扫。' });
+      publishSourceWatch(id);
+    }
+  };
+  const syncSourceWatches = async () => {
+    const sources = manager.catalog().skillSources ?? [];
+    for (const id of sourceWatches.keys()) if (!sources.some(source => source.id === id && source.watchEnabled)) stopSourceWatch(id);
+    for (const source of sources) if (source.watchEnabled) await startSourceWatch(source.id);
+  };
 
   const allowedOrigins = new Set(options.allowedOrigins ?? []);
   if (options.allowedOrigins === undefined && options.devMode === true) {
@@ -203,6 +459,32 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
   app.get(`${API}/adapters`, async () => manager.adapterInfos());
   app.get(`${API}/compatibility`, async () => manager.compatibilityReport());
   app.get(`${API}/catalog`, async () => manager.catalog());
+  app.get(`${API}/resource-preferences`, () => {
+    try {
+      const saved = store.getMetadata('resourcePreferences');
+      if (!saved) return { favorites: [], savedFilters: [], display: { showBuiltin: false, showCacheOnly: false } };
+      const raw: unknown = JSON.parse(saved);
+      if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        const record = raw as { savedFilters?: unknown[]; [key: string]: unknown };
+        if (Array.isArray(record.savedFilters)) record.savedFilters = record.savedFilters.map(item => {
+          if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+          const savedFilter = item as { filters?: Record<string, unknown> };
+          if (savedFilter.filters && savedFilter.filters.favoritesOnly === undefined) savedFilter.filters.favoritesOnly = false;
+          if (savedFilter.filters && savedFilter.filters.showBuiltin === undefined) savedFilter.filters.showBuiltin = false;
+          if (savedFilter.filters && savedFilter.filters.showCacheOnly === undefined) savedFilter.filters.showCacheOnly = false;
+          return item;
+        });
+        if (record.display === undefined) record.display = { showBuiltin: false, showCacheOnly: false };
+      }
+      return ResourcePreferencesSchema.parse(raw);
+    } catch { return { favorites: [], savedFilters: [], display: { showBuiltin: false, showCacheOnly: false } }; }
+  });
+  app.put(`${API}/resource-preferences`, async (request) => {
+    const parsed = ResourcePreferencesSchema.safeParse(request.body);
+    if (!parsed.success) throw new ManagerError(400, 'INVALID_REQUEST', '资源偏好格式无效。');
+    store.setMetadata('resourcePreferences', JSON.stringify(parsed.data));
+    return parsed.data;
+  });
   app.get(`${API}/skills/details`, async (request) => {
     const query = request.query as { bindingId?: string; sourceId?: string; findingPath?: string };
     let skillDir: string | null = null;
@@ -225,23 +507,69 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
         metadataIssues: ['此 Skill 记录来自客户端配置项；未关联到已扫描的 SKILL.md 文件，因此正文与扩展元数据不可用。'], formatStatus: 'invalid',
       };
     } else if (query.sourceId && query.findingPath) {
-      const source = manager.catalog().skillSources?.find(item => item.id === query.sourceId);
-      const finding = source?.report?.findings.find(item => item.logicalPath === query.findingPath && (item.status === 'recognized' || item.status === 'candidate'));
-      if (!source || !finding) throw new ManagerError(404, 'SKILL_NOT_FOUND', 'Skill 未登记或未被扫描发现。');
-      let rootReal: string | null;
-      try { rootReal = await locateSourceRoot(source); } catch { rootReal = null; }
-      if (!rootReal) throw new ManagerError(403, 'SKILL_PATH_UNVERIFIED', '来源扫描根缺少有效的物理路径证据或已变化，请重新扫描后再查看详情。');
-      const target = path.resolve(path.dirname(finding.logicalPath));
-      let actualDir: string;
-      try { actualDir = await realpath(target); } catch { throw new ManagerError(422, 'SKILL_DETAILS_UNAVAILABLE', '已扫描的 Skill 路径已不存在。'); }
-      if (!isWithin(actualDir, rootReal)) throw new ManagerError(403, 'SKILL_PATH_UNVERIFIED', 'Skill 实际路径超出登记范围。');
-      const sameDirectory = process.platform === 'win32' ? actualDir.toLocaleLowerCase('en-US') === target.toLocaleLowerCase('en-US') : actualDir === target;
-      if (!source.followLinks && !sameDirectory) throw new ManagerError(403, 'SKILL_PATH_UNVERIFIED', '该资源经过符号链接；登记时未开启链接跟随。');
-      skillDir = target;
-      allowedRootReal = rootReal;
+      const registeredSource = manager.catalog().skillSources?.find(item => item.id === query.sourceId);
+      const registeredFinding = registeredSource?.report?.findings.find(item => item.logicalPath === query.findingPath
+        && (item.status === 'recognized' || item.status === 'candidate'));
+      if (!registeredSource || !registeredFinding) throw new ManagerError(404, 'SKILL_NOT_FOUND', 'Skill 未登记或未被扫描发现。');
+      let located: Awaited<ReturnType<typeof locateSourceFinding>>;
+      try { located = await locateSourceFinding(query.sourceId, query.findingPath); } catch { located = null; }
+      if (!located) throw new ManagerError(403, 'SKILL_PATH_UNVERIFIED', '来源、Skill manifest 或链接物理身份已变化；请重新扫描后再查看详情。');
+      skillDir = located.directory;
+      allowedRootReal = located.root;
     } else throw new ManagerError(400, 'INVALID_REQUEST', '需要已登记的 bindingId，或 sourceId 与 findingPath。');
     try { return await readSkillDetails(skillDir, { ...(allowedRootReal ? { allowedRoot: allowedRootReal } : {}) }); }
     catch (error) { throw new ManagerError(422, 'SKILL_DETAILS_UNAVAILABLE', error instanceof Error ? error.message : '无法读取 Skill 详情。'); }
+  });
+  app.post(`${API}/skills/compare`, async (request) => {
+    const parsed = SkillCompareRequestSchema.safeParse(request.body);
+    if (!parsed.success) throw new ManagerError(400, 'INVALID_REQUEST', 'Skill 对比请求无效。');
+    const resolve = async (reference: typeof parsed.data.left) => {
+      let directory: string;
+      let root: string;
+      if (reference.kind === 'source') {
+        const source = manager.catalog().skillSources?.find(item => item.id === reference.sourceId);
+        const finding = source?.report?.findings.find(item => item.logicalPath === reference.findingPath && item.status === 'recognized');
+        if (!source || !finding) throw new ManagerError(404, 'SKILL_NOT_FOUND', '所选 Skill 当前不在扫描结果中。');
+        let located: Awaited<ReturnType<typeof locateSourceFinding>>;
+        try { located = await locateSourceFinding(reference.sourceId, reference.findingPath, true); } catch { located = null; }
+        if (!located) throw new ManagerError(403, 'SKILL_PATH_UNVERIFIED', '来源、Skill manifest 或链接物理身份已变化；请重扫后再对比。');
+        directory = located.directory; root = located.root;
+      } else {
+        const binding = store.getBinding(reference.bindingId);
+        if (!binding || binding.kind !== 'skill' || !binding.skillRootPath) throw new ManagerError(404, 'SKILL_NOT_FOUND', '所选绑定没有可对比的磁盘 Skill。');
+        const located = await locateBinding(binding);
+        if (!located) throw new ManagerError(403, 'SKILL_PATH_UNVERIFIED', 'Skill 物理路径证据已变化，请重新扫描。');
+        const info = await stat(located.path);
+        directory = info.isDirectory() ? located.path : path.dirname(located.path); root = located.root;
+      }
+      const details = await readSkillDetails(directory, { includeSupports: false, allowedRoot: root });
+      const manifestPath = ['SKILL.md', 'skill.md'].map(name => path.join(directory, name));
+      let bytes: Buffer | null = null; let physical: string | null = null;
+      for (const candidate of manifestPath) {
+        try {
+          const actual = await realpath(candidate);
+          if (!isWithin(actual, root)) continue;
+          const info = await stat(actual);
+          if (!info.isFile() || info.size > 2 * 1024 * 1024) continue;
+          bytes = await readFile(actual); physical = actual; break;
+        } catch { /* try alternate case */ }
+      }
+      if (!bytes || !physical) throw new ManagerError(422, 'SKILL_DETAILS_UNAVAILABLE', '无法安全读取已登记的 manifest。');
+      const identity = await stat(physical);
+      return { details, physical, identity: `${identity.dev}:${identity.ino}`, hash: createHash('sha256').update(bytes).digest('hex') };
+    };
+    let left: Awaited<ReturnType<typeof resolve>>; let right: Awaited<ReturnType<typeof resolve>>;
+    try { [left, right] = await Promise.all([resolve(parsed.data.left), resolve(parsed.data.right)]); }
+    catch (error) { if (error instanceof ManagerError) throw error; throw new ManagerError(422, 'SKILL_DETAILS_UNAVAILABLE', '所选 Skill 当前无法安全读取。'); }
+    const maxBody = 20_000;
+    return {
+      samePhysicalSource: left.identity === right.identity, sameName: left.details.name === right.details.name,
+      manifestIdentical: left.hash === right.hash,
+      left: { name: left.details.name, description: left.details.description, author: left.details.author, version: left.details.version, path: left.physical },
+      right: { name: right.details.name, description: right.details.description, author: right.details.author, version: right.details.version, path: right.physical },
+      bodyEqual: left.details.body === right.details.body, bodyTruncated: left.details.body.length > maxBody || right.details.body.length > maxBody,
+      leftBody: left.details.body.slice(0, maxBody), rightBody: right.details.body.slice(0, maxBody),
+    };
   });
   app.get(`${API}/skills/search`, async (request) => {
     const query = request.query as { q?: string; offset?: string };
@@ -440,22 +768,71 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
   app.post(`${API}/skill-sources`, async (request, reply) => {
     const input = RegisterSkillSourceSchema.safeParse(request.body);
     if (!input.success) throw new ManagerError(400, 'INVALID_REQUEST', input.error.issues[0]?.message ?? '资源入口登记请求无效。');
-    const source = await manager.registerSkillSource(input.data);
+    const prior = manager.catalog().skillSources?.find(item => path.resolve(item.path) === path.resolve(input.data.path));
+    const active = prior ? sourceWatches.get(prior.id)?.running ?? null : null;
+    const registration = manager.registerSkillSource(input.data);
+    if (prior) stopSourceWatch(prior.id);
+    if (active) await active;
+    const source = await registration;
+    await syncSourceWatches();
     reply.code(201);
     app.agentdeckEvents.publish({ type: 'catalog.changed', payload: { kind: 'skill-source', id: source.id } });
     return source;
   });
   app.post(`${API}/skill-sources/:id/scan`, async (request) => {
     const { id } = request.params as { id: string };
-    const source = await manager.scanRegisteredSkillSource(id);
+    const parsed = SkillSourceScanSchema.safeParse(request.body ?? {});
+    if (!parsed.success) throw new ManagerError(400, 'INVALID_REQUEST', '重扫选项无效。');
+    const source = await manager.scanRegisteredSkillSource(id, { force: parsed.data.force });
+    await syncSourceWatches();
     app.agentdeckEvents.publish({ type: 'catalog.changed', payload: { kind: 'skill-source-scan', id } });
-    return source;
+    return manager.catalog().skillSources?.find(item => item.id === source.id) ?? source;
+  });
+  app.put(`${API}/skill-sources/:id/watch`, async (request) => {
+    const { id } = request.params as { id: string };
+    const parsed = SkillSourceWatchSchema.safeParse(request.body);
+    if (!parsed.success) throw new ManagerError(400, 'INVALID_REQUEST', '监听选项无效。');
+    const active = sourceWatches.get(id)?.running ?? null;
+    manager.updateSkillSource(id, { watchEnabled: parsed.data.enabled, watchStatus: parsed.data.enabled ? 'error' : 'disabled', watchError: null });
+    if (parsed.data.enabled) await startSourceWatch(id);
+    else { stopSourceWatch(id); if (active) await active; }
+    publishSourceWatch(id);
+    return manager.catalog().skillSources?.find(source => source.id === id) ?? null;
   });
   app.delete(`${API}/skill-sources/:id`, async (request, reply) => {
     const { id } = request.params as { id: string };
+    const active = sourceWatches.get(id)?.running ?? null;
+    manager.updateSkillSource(id, { watchEnabled: false, watchStatus: 'disabled', watchError: null });
+    stopSourceWatch(id);
+    if (active) await active;
     manager.removeSkillSource(id);
     reply.code(204);
     app.agentdeckEvents.publish({ type: 'catalog.changed', payload: { kind: 'skill-source-removed', id } });
+  });
+  app.post(`${API}/resources/open-directory`, async (request) => {
+    const parsed = ResourceReferenceSchema.safeParse(request.body);
+    if (!parsed.success) throw new ManagerError(400, 'INVALID_REQUEST', '资源引用无效。');
+    const reference = parsed.data;
+    let directory: string | null = null;
+    if (reference.kind === 'source') {
+      const source = manager.catalog().skillSources?.find(item => item.id === reference.sourceId);
+      const finding = source?.report?.findings.find(item => item.logicalPath === reference.findingPath && item.status === 'recognized');
+      if (!source || !finding) throw new ManagerError(404, 'RESOURCE_NOT_FOUND', '该 Skill 不在当前扫描结果中。');
+      let located: Awaited<ReturnType<typeof locateSourceFinding>>;
+      try { located = await locateSourceFinding(reference.sourceId, reference.findingPath, true); } catch { located = null; }
+      if (!located) throw new ManagerError(403, 'PATH_REJECTED', '登记 Skill 的 manifest 或链接物理身份已变化、缺失或越界；请重扫。');
+      directory = located.directory;
+    } else {
+      const binding = store.getBinding(reference.bindingId);
+      if (!binding) throw new ManagerError(404, 'RESOURCE_NOT_FOUND', '资源绑定不存在。');
+      try { directory = await locateTrustedDirectory(binding); }
+      catch { directory = null; }
+      if (!directory) throw new ManagerError(403, 'PATH_REJECTED', '资源来源缺少有效的登记物理证据、已越界或已变化；请重新扫描。');
+    }
+    if (!directory) throw new ManagerError(404, 'RESOURCE_NOT_FOUND', '资源目录不可用。');
+    if (options.openDirectory) await options.openDirectory(directory);
+    else await openLocalDirectory(directory);
+    return { opened: true };
   });
   app.post(`${API}/scans`, async (request) => {
     const input = ScanRequestSchema.safeParse(request.body ?? {});
@@ -716,15 +1093,22 @@ export function createApp(options: AppOptions = {}): FastifyInstance {
   }
 
   app.addHook('onClose', async () => {
+    shuttingDown = true;
+    for (const id of [...sourceWatches.keys()]) stopSourceWatch(id);
+    await Promise.allSettled([...activeWatcherTasks]);
     if (options.closeStoreOnClose !== false && !options.store) store.close();
     listeners.clear();
   });
   app.addHook('preClose', async () => {
+    shuttingDown = true;
+    for (const id of [...sourceWatches.keys()]) stopSourceWatch(id);
+    await Promise.allSettled([...activeWatcherTasks]);
     for (const response of streamResponses) response.end();
     streamResponses.clear();
     listeners.clear();
   });
   app.addHook('onReady', async () => {
+    await syncSourceWatches();
     const address = app.server.address();
     if (address && typeof address !== 'string') resolvedPort = address.port;
     if (engine.recoverIncomplete) {
@@ -835,6 +1219,17 @@ function sendError(reply: { code(status: number): unknown; send(payload: unknown
 function isWithin(candidate: string, parent: string): boolean {
   const relative = path.relative(path.resolve(parent), path.resolve(candidate));
   return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+}
+function samePath(left: string, right: string): boolean {
+  return process.platform === 'win32' ? left.toLocaleLowerCase('en-US') === right.toLocaleLowerCase('en-US') : left === right;
+}
+async function openLocalDirectory(directory: string): Promise<void> {
+  const command = process.platform === 'win32' ? 'explorer.exe' : process.platform === 'darwin' ? 'open' : 'xdg-open';
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(command, [directory], { detached: true, stdio: 'ignore', windowsHide: true, shell: false });
+    child.once('error', reject);
+    child.once('spawn', () => { child.unref(); resolve(); });
+  });
 }
 function isLoopbackRequest(request: FastifyRequest, port: number): boolean {
   const remote = request.raw.socket.remoteAddress;

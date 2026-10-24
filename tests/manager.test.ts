@@ -3,6 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { AgentAdapter, AgentInstance } from '@agentdeck/contracts';
 import { ManagerService } from '../packages/core/src/index';
+import { scanSkillSource } from '../packages/core/src/skill-sources';
 import { createAdapterRegistry, codexAdapter } from '../packages/adapters/src/index';
 import { createStore, type AgentDeckStore } from '../packages/storage/src/index';
 import { scanNotice } from '../apps/web/src/scan-state';
@@ -102,6 +103,80 @@ describe('persisted discovery context and scan outcomes', () => {
     expect(recovered.lastScan?.status).toBe('succeeded');
     expect(scanNotice(recovered).type).toBe('success');
     expect(recovered.instances[0]?.diagnostics).not.toContain('扫描失败；保留上一次的索引。');
+  });
+
+  it('persists binding scan deltas and ignores timestamp-only changes', async () => {
+    const root = await codexConfig();
+    const config = path.join(root, 'config.toml');
+    await file(config, '[mcp_servers.probe]\ncommand = "never-run"\nenabled = true\n');
+    let now = new Date('2026-10-23T01:00:00Z');
+    const manager = new ManagerService({ store, adapters: [codexAdapter], homeDir: home, env: {}, now: () => now });
+    manager.registerInstance({ agentId: 'codex', configRoot: root });
+    const first = await manager.scan();
+    const firstChange = first.bindingChanges?.at(-1);
+    expect(firstChange).toMatchObject({ baseline: true, added: [], removed: [], statusChanged: [] });
+    now = new Date('2026-10-23T01:01:00Z');
+    const same = await manager.scan();
+    expect(same.bindingChanges?.at(-1)).toMatchObject({ baseline: false, added: [], removed: [], statusChanged: [] });
+    await file(config, '[mcp_servers.probe]\ncommand = "never-run"\nenabled = false\n');
+    now = new Date('2026-10-23T01:02:00Z');
+    const changed = await manager.scan();
+    const binding = changed.bindings.find(item => item.name === 'probe')!;
+    expect(changed.bindingChanges?.at(-1)?.statusChanged.map(item => item.id)).toContain(binding.id);
+    expect(changed.bindingChanges?.length).toBe(3);
+  });
+
+  it('retains a complete client baseline through partial scans and reports removals with readable summaries', async () => {
+    const root = path.join(directory, 'complete-client-baseline');
+    const config = path.join(root, 'config.toml');
+    await file(config, '[mcp_servers.alpha]\ncommand = "never-run"\n[mcp_servers.beta]\ncommand = "never-run"\n');
+    let partial = false;
+    const adapter: AgentAdapter = { ...codexAdapter, scan: async context => {
+      const report = await codexAdapter.scan(context);
+      return partial ? { ...report, bindings: report.bindings.filter(binding => binding.name === 'alpha'), diagnostics: [...report.diagnostics, 'isolated partial scan fixture'] } : report;
+    } };
+    let manager = new ManagerService({ store, adapters: [adapter], homeDir: home, env: {} });
+    manager.registerInstance({ agentId: 'codex', configRoot: root });
+    const first = await manager.scan();
+    const beta = first.bindings.find(binding => binding.name === 'beta')!;
+    expect(first.bindingChanges?.at(-1)).toMatchObject({ baseline: true, projectId: null });
+    partial = true;
+    const incomplete = await manager.scan();
+    expect(incomplete.bindings.some(binding => binding.id === beta.id)).toBe(true);
+    expect(incomplete.bindingChanges?.at(-1)).toMatchObject({ partial: true, removed: [], totals: { removed: 0 } });
+    store.close();
+    store = createStore(path.join(directory, 'data'));
+    partial = false;
+    manager = new ManagerService({ store, adapters: [adapter], homeDir: home, env: {} });
+    await file(config, '[mcp_servers.alpha]\ncommand = "never-run"\n');
+    const complete = await manager.scan();
+    const changes = complete.bindingChanges?.at(-1);
+    expect(changes?.totals).toMatchObject({ added: 0, removed: 1, statusChanged: 0 });
+    expect(changes?.removed[0]).toMatchObject({ id: beta.id, name: 'beta', path: config, kind: 'mcp' });
+  });
+
+  it('does not commit an in-flight source scan across a listener generation change', async () => {
+    const sourceRoot = path.join(directory, 'listener-generation');
+    await file(path.join(sourceRoot, 'SKILL.md'), '---\nname: listener\ndescription: Generation test.\n---\nbody');
+    let block = false;
+    let announceStarted!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>(resolve => { announceStarted = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const manager = new ManagerService({ store, adapters: [], homeDir: home, skillSourceScanner: async (source, options) => {
+      if (block) { announceStarted(); await gate; }
+      return scanSkillSource(source, options);
+    } });
+    const source = await manager.registerSkillSource({ path: sourceRoot });
+    manager.updateSkillSource(source.id, { watchEnabled: true, watchStatus: 'watching' });
+    block = true;
+    const scanning = manager.scanRegisteredSkillSource(source.id);
+    await started;
+    manager.updateSkillSource(source.id, { watchEnabled: false, watchStatus: 'disabled' });
+    release();
+    const final = await scanning;
+    expect(final.watchEnabled).toBe(false);
+    expect(final.watchStatus).toBe('disabled');
   });
 
   it('aggregates a project failure even when a later project succeeds', async () => {

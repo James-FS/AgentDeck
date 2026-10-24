@@ -1,9 +1,9 @@
-import { createHash } from 'node:crypto';
-import { mkdir, writeFile, access, mkdtemp, rm, stat } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, writeFile, access, mkdtemp, rm, stat, realpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type {
-  AdapterInfo, AgentAdapter, AgentId, AgentInstance, Binding, Catalog, ClientCompatibilityReport, SkillSource,
+  AdapterInfo, AgentAdapter, AgentId, AgentInstance, Binding, BindingChangeSet, Catalog, ClientCompatibilityReport, SkillSource,
   ClientVersionEvidence, CompatibilityReport, ExecutableIdentity, Project, ScanOutcome,
 } from '@agentdeck/contracts';
 import {
@@ -13,7 +13,7 @@ import {
 } from './version-check.js';
 import { buildCapabilityEvidence } from './compatibility.js';
 import { classifyCatalog } from './classification.js';
-import { scanSkillSource, skillSourceId } from './skill-sources.js';
+import { clearSkillSourceCache, scanSkillSource, skillSourceId } from './skill-sources.js';
 export { readSkillDetails } from './skill-details.js';
 export { scanSkillSource, skillSourceId } from './skill-sources.js';
 
@@ -32,6 +32,7 @@ export interface ManagerOptions {
   versionRunner?: VersionCheckRunner;
   platform?: NodeJS.Platform;
   now?: () => Date;
+  skillSourceScanner?: typeof scanSkillSource;
 }
 
 export interface ManagerStore {
@@ -56,7 +57,9 @@ export class ManagerService {
   readonly versionRunner: VersionCheckRunner;
   readonly platform: NodeJS.Platform;
   private readonly now: () => Date;
+  private readonly skillSourceScanner: typeof scanSkillSource;
   private readonly skillSourceGenerations = new Map<string, number>();
+  private readonly skillSourceScans = new Map<string, Promise<SkillSource>>();
 
   constructor(options: ManagerOptions) {
     this.store = options.store;
@@ -69,6 +72,7 @@ export class ManagerService {
     this.versionRunner = options.versionRunner ?? runVersionCommand;
     this.platform = options.platform ?? process.platform;
     this.now = options.now ?? (() => new Date());
+    this.skillSourceScanner = options.skillSourceScanner ?? scanSkillSource;
   }
 
   catalog(): Catalog {
@@ -97,6 +101,7 @@ export class ManagerService {
     const prior = sources.find(item => item.id === id);
     this.bumpSkillSourceGeneration(id);
     const source: SkillSource = { id, path: resolved, mode: input.mode ?? 'quick', followLinks: input.followLinks ?? false,
+      watchEnabled: prior?.watchEnabled ?? false, watchStatus: prior?.watchEnabled ? 'error' : 'disabled', watchError: null,
       scannedAt: prior?.mode === (input.mode ?? 'quick') && prior.followLinks === (input.followLinks ?? false) ? prior.scannedAt : null,
       report: prior?.mode === (input.mode ?? 'quick') && prior.followLinks === (input.followLinks ?? false) ? prior.report : null };
     const next = [...sources.filter(item => item.id !== id), source];
@@ -104,25 +109,94 @@ export class ManagerService {
     return this.scanRegisteredSkillSource(id);
   }
 
-  async scanRegisteredSkillSource(id: string): Promise<SkillSource> {
+  async scanRegisteredSkillSource(id: string, options: { force?: boolean; expectedRootRealPath?: string } = {}): Promise<SkillSource> {
+    const pending = this.skillSourceScans.get(id);
+    if (pending) {
+      await pending;
+      // A watcher event that arrived during a scan must trigger one follow-up pass.
+      return this.scanRegisteredSkillSource(id, options);
+    }
+    const task = this.performSkillSourceScan(id, options);
+    this.skillSourceScans.set(id, task);
+    try { return await task; } finally { if (this.skillSourceScans.get(id) === task) this.skillSourceScans.delete(id); }
+  }
+
+  private async performSkillSourceScan(id: string, options: { force?: boolean; expectedRootRealPath?: string }): Promise<SkillSource> {
     const sources = this.readSkillSources();
     const source = sources.find(item => item.id === id);
     if (!source) throw new ManagerError(404, 'SKILL_SOURCE_NOT_FOUND', '所选资源入口未登记。');
     const generation = this.bumpSkillSourceGeneration(id);
-    const updated: SkillSource = { ...source, scannedAt: this.now().toISOString(), report: await scanSkillSource(source) };
+    const report = await this.skillSourceScanner(source, options);
+    const scannedAt = this.now().toISOString();
+    const baseline = source.fingerprints === undefined;
+    let changes = source.changes ?? null;
+    let nextFingerprints: Record<string, { hash: string; status: 'recognized' | 'candidate' }> = Object.fromEntries(
+      Object.entries(source.fingerprints ?? {}).map(([key, value]) => [key, typeof value === 'string' ? { hash: value, status: 'recognized' as const } : value]),
+    );
+    if (report.status !== 'failed' && (!report.diagnostics.length || report.status === 'partial')) {
+      const current = new Map<string, { hash: string; status: 'recognized' | 'candidate' }>();
+      const fingerprint = async (root: string, finding: { logicalPath: string; actualPath: string; status: string; contentHash?: string }): Promise<string | null> => {
+        if (finding.status !== 'recognized' && finding.status !== 'candidate') return null;
+        try {
+          const actualRoot = await realpath(root);
+          const manifest = await realpath(finding.logicalPath);
+          const rel = path.relative(actualRoot, manifest);
+          if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return null;
+          const info = await stat(manifest);
+          if (!info.isFile()) return null;
+          return finding.contentHash ?? 'unhashed-existing-manifest';
+        } catch { return null; }
+      };
+      for (const finding of report.findings) {
+        const hash = await fingerprint(source.path, finding);
+        if (hash) {
+          const resolved = path.resolve(finding.logicalPath);
+          current.set(process.platform === 'win32' ? resolved.toLocaleLowerCase('en-US') : resolved, { hash, status: finding.status as 'recognized' | 'candidate' });
+        }
+      }
+      const prior = new Map<string, { hash: string; status: 'recognized' | 'candidate' }>();
+      for (const [key, value] of Object.entries(source.fingerprints ?? {})) {
+        prior.set(key, typeof value === 'string' ? { hash: value, status: 'recognized' } : value);
+      }
+      const added = [...current.keys()].filter(key => !prior.has(key)).slice(0, 100);
+      const modified = [...current.keys()].filter(key => prior.has(key)
+        && (current.get(key)?.hash !== prior.get(key)?.hash || current.get(key)?.status !== prior.get(key)?.status)).slice(0, 100);
+      const removed = report.status === 'complete' && !report.diagnostics.length ? [...prior.keys()].filter(key => !current.has(key)).slice(0, 100) : [];
+      nextFingerprints = report.status === 'complete' && !report.diagnostics.length
+        ? Object.fromEntries(current)
+        : Object.fromEntries([...prior, ...current]);
+      if (Object.keys(nextFingerprints).length > 5_000) nextFingerprints = Object.fromEntries(Object.entries(nextFingerprints).slice(-5_000));
+      changes = { scannedAt, baseline, truncated: added.length + modified.length + removed.length >= 100,
+        added: baseline ? [] : added, modified: baseline ? [] : modified, removed: baseline ? [] : removed };
+    }
+    const updated: SkillSource = { ...source, scannedAt, report, changes, fingerprints: nextFingerprints };
     const currentSources = this.readSkillSources();
     const current = currentSources.find(item => item.id === id);
     if (!current) throw new ManagerError(404, 'SKILL_SOURCE_NOT_FOUND', '扫描期间该资源入口已被移除。');
     if (this.skillSourceGenerations.get(id) !== generation
       || current.path !== source.path || current.mode !== source.mode || current.followLinks !== source.followLinks) return current;
-    this.writeSkillSources([...currentSources.filter(item => item.id !== id), updated]);
-    return updated;
+    const committed: SkillSource = { ...updated,
+      ...(current.watchEnabled === undefined ? {} : { watchEnabled: current.watchEnabled }),
+      ...(current.watchStatus === undefined ? {} : { watchStatus: current.watchStatus }),
+      ...(current.watchError === undefined ? {} : { watchError: current.watchError }) };
+    this.writeSkillSources([...currentSources.filter(item => item.id !== id), committed]);
+    return committed;
   }
 
   removeSkillSource(id: string): void {
     this.bumpSkillSourceGeneration(id);
+    clearSkillSourceCache(id);
     const sources = this.readSkillSources();
     this.writeSkillSources(sources.filter(item => item.id !== id));
+  }
+  updateSkillSource(id: string, update: Partial<Pick<SkillSource, 'watchEnabled' | 'watchStatus' | 'watchError'>>): SkillSource {
+    const sources = this.readSkillSources();
+    const current = sources.find(item => item.id === id);
+    if (!current) throw new ManagerError(404, 'SKILL_SOURCE_NOT_FOUND', '所选资源入口未登记。');
+    if (update.watchEnabled !== undefined && update.watchEnabled !== current.watchEnabled) this.bumpSkillSourceGeneration(id);
+    const next = { ...current, ...update };
+    this.writeSkillSources(sources.map(item => item.id === id ? next : item));
+    return next;
   }
   adapterInfos(): AdapterInfo[] { return this.adapters.map(adapter => adapter.info); }
 
@@ -511,6 +585,8 @@ export class ManagerService {
           updatedAt: this.now().toISOString(),
           };
         });
+        const priorBindings = this.store.catalog().bindings.filter(binding => binding.instanceId === instance.id
+          && (project ? binding.projectId === project.id : binding.projectId === null));
         const retained = this.store.catalog().bindings.filter(binding =>
           binding.instanceId === instance.id && (project
             ? binding.projectId !== null && binding.projectId !== project.id
@@ -519,7 +595,44 @@ export class ManagerService {
         const merged = new Map<string, Binding>();
         for (const binding of retained) merged.set(binding.id, binding);
         for (const binding of scanned) merged.set(binding.id, binding);
+        if (report.diagnostics.length > 0) {
+          const currentIds = new Set(scanned.map(binding => binding.id));
+          for (const binding of priorBindings) if (!currentIds.has(binding.id)) merged.set(binding.id, binding);
+        }
         this.store.replaceBindings(instance.id, [...merged.values()]);
+        const scopeKey = `${instance.id}:${project?.id ?? 'user'}`;
+        let baselineScopes: Record<string, boolean> = {};
+        try { baselineScopes = JSON.parse(this.store.getMetadata('bindingChangeBaselines') ?? '{}') as Record<string, boolean>; } catch { baselineScopes = {}; }
+        const baseline = baselineScopes[scopeKey] !== true;
+        if (report.diagnostics.length === 0) baselineScopes[scopeKey] = true;
+        this.store.setMetadata('bindingChangeBaselines', JSON.stringify(baselineScopes));
+        const priorById = new Map(priorBindings.map(binding => [binding.id, binding]));
+        const currentById = new Map(scanned.map(binding => [binding.id, binding]));
+        const signature = (binding: Binding) => JSON.stringify({ enabled: binding.enabled, configurationStateReason: binding.configurationStateReason,
+          writable: binding.writable, sourcePath: path.resolve(binding.sourcePath), toggleTarget: binding.toggleTarget ?? null });
+        const summary = (binding: Binding, before?: Binding): BindingChangeSet['added'][number] => ({
+          id: binding.id, name: binding.displayName ?? binding.name, path: binding.sourcePath, kind: binding.kind,
+          ...(before ? { before: statusLabel(before), after: statusLabel(binding) } : {}),
+        });
+        const allAdded = baseline ? [] : [...currentById.keys()].filter(id => !priorById.has(id)).flatMap(id => {
+          const binding = currentById.get(id); return binding ? [summary(binding)] : [];
+        });
+        const allRemoved = baseline || report.diagnostics.length > 0 ? [] : [...priorById.keys()].filter(id => !currentById.has(id)).flatMap(id => {
+          const binding = priorById.get(id); return binding ? [summary(binding)] : [];
+        });
+        const allStatusChanged = baseline ? [] : [...currentById.keys()].flatMap(id => {
+          const priorBinding = priorById.get(id); const currentBinding = currentById.get(id);
+          return priorBinding && currentBinding && signature(priorBinding) !== signature(currentBinding) ? [summary(currentBinding, priorBinding)] : [];
+        });
+        const change: BindingChangeSet = { id: randomUUID(), scannedAt: this.now().toISOString(),
+          instanceId: instance.id, projectId: project?.id ?? null, baseline, partial: report.diagnostics.length > 0,
+          truncated: allAdded.length > 100 || allRemoved.length > 100 || allStatusChanged.length > 100,
+          totals: { added: allAdded.length, removed: allRemoved.length, statusChanged: allStatusChanged.length },
+          added: allAdded.slice(0, 100), removed: allRemoved.slice(0, 100), statusChanged: allStatusChanged.slice(0, 100) };
+        const changeHistory = this.store.getMetadata('bindingChanges');
+        let history: BindingChangeSet[] = [];
+        try { history = changeHistory ? JSON.parse(changeHistory) as BindingChangeSet[] : []; } catch { history = []; }
+        this.store.setMetadata('bindingChanges', JSON.stringify([...history.slice(-49), change]));
         outcome.succeeded += 1;
         const prior = this.store.getInstance(instance.id);
         if (prior?.diagnostics.includes('扫描失败；保留上一次的索引。')) {
@@ -591,6 +704,10 @@ async function directoryExists(directory: string): Promise<boolean> {
 
 function isAgentId(value: string): value is AgentId {
   return value === 'codex' || value === 'claude-code' || value === 'zcode' || value === 'deepseek-harness';
+}
+
+function statusLabel(binding: Binding): string {
+  return binding.enabled === true ? 'enabled' : binding.enabled === false ? 'disabled' : 'unknown';
 }
 
 function validVersionEvidence(value: unknown, agentId: AgentId): value is ClientVersionEvidence {

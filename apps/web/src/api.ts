@@ -15,8 +15,10 @@ import type {
   SkillSearchResponse,
   SkillDetails,
   SessionResponse,
+  ResourcePreferences,
+  SkillCompareResponse,
 } from '@agentdeck/contracts';
-import { ConfigurationControlSchema, ResourceClassificationSchema, ScanOutcomeSchema, SkillAvailabilityResponseSchema, SkillDetailsSchema, SkillSearchResponseSchema, SkillSourceSchema } from '@agentdeck/contracts';
+import { ConfigurationControlSchema, ResourceClassificationSchema, ResourcePreferencesSchema, ScanOutcomeSchema, SkillAvailabilityResponseSchema, SkillCompareRequestSchema, SkillCompareResponseSchema, SkillDetailsSchema, SkillSearchResponseSchema, SkillSourceSchema } from '@agentdeck/contracts';
 
 const API = '/api/v1';
 let csrfToken: string | null = null;
@@ -271,6 +273,16 @@ export const api = {
   async catalog(): Promise<Catalog> {
     return validateCatalog(await request<unknown>(`${API}/catalog`));
   },
+  async resourcePreferences(): Promise<ResourcePreferences> {
+    const parsed = ResourcePreferencesSchema.safeParse(await request<unknown>(`${API}/resource-preferences`));
+    if (!parsed.success) throw new ApiFailure('服务返回的资源偏好格式无效。', 200, 'INVALID_RESPONSE');
+    return parsed.data;
+  },
+  async saveResourcePreferences(value: ResourcePreferences): Promise<ResourcePreferences> {
+    const parsed = ResourcePreferencesSchema.safeParse(value);
+    if (!parsed.success) throw new ApiFailure('资源偏好格式无效。', 400, 'INVALID_REQUEST');
+    return ResourcePreferencesSchema.parse(await request<unknown>(`${API}/resource-preferences`, { method: 'PUT', body: JSON.stringify(parsed.data) }));
+  },
 
   async adapters(): Promise<AdapterInfo[]> {
     const response = await request<unknown>(`${API}/adapters`);
@@ -316,8 +328,14 @@ export const api = {
   async registerSkillSource(input: { path: string; mode: 'quick' | 'deep'; followLinks: boolean }): Promise<void> {
     await request<unknown>(`${API}/skill-sources`, { method: 'POST', body: JSON.stringify(input) });
   },
-  async scanSkillSource(id: string): Promise<void> {
-    await request<unknown>(`${API}/skill-sources/${encodeURIComponent(id)}/scan`, { method: 'POST', body: '{}' });
+  async scanSkillSource(id: string, force = false): Promise<void> {
+    await request<unknown>(`${API}/skill-sources/${encodeURIComponent(id)}/scan`, { method: 'POST', body: JSON.stringify({ force }) });
+  },
+  async watchSkillSource(id: string, enabled: boolean): Promise<void> {
+    await request<unknown>(`${API}/skill-sources/${encodeURIComponent(id)}/watch`, { method: 'PUT', body: JSON.stringify({ enabled }) });
+  },
+  async openResourceDirectory(reference: { kind: 'binding'; bindingId: string } | { kind: 'source'; sourceId: string; findingPath: string }): Promise<void> {
+    await request<unknown>(`${API}/resources/open-directory`, { method: 'POST', body: JSON.stringify(reference) });
   },
   async removeSkillSource(id: string): Promise<void> {
     await request<void>(`${API}/skill-sources/${encodeURIComponent(id)}`, { method: 'DELETE' });
@@ -334,6 +352,12 @@ export const api = {
     const parsed = SkillSearchResponseSchema.safeParse(await request<unknown>(`${API}/skills/search?${params}`, { signal }));
     if (!parsed.success) throw new ApiFailure('服务返回的 Skill 搜索格式无效。', 200, 'INVALID_RESPONSE');
     return parsed.data;
+  },
+  async compareSkills(left: { kind: 'binding'; bindingId: string } | { kind: 'source'; sourceId: string; findingPath: string }, right: { kind: 'binding'; bindingId: string } | { kind: 'source'; sourceId: string; findingPath: string }): Promise<SkillCompareResponse> {
+    const payload = SkillCompareRequestSchema.parse({ left, right });
+    const result = SkillCompareResponseSchema.safeParse(await request<unknown>(`${API}/skills/compare`, { method: 'POST', body: JSON.stringify(payload) }));
+    if (!result.success) throw new ApiFailure('服务返回的 Skill 对比结果格式无效。', 200, 'INVALID_RESPONSE');
+    return result.data;
   },
   async skillAvailability(instanceId: string, projectId: string, workdir: string, signal?: AbortSignal): Promise<SkillAvailabilityResponse> {
     const params = new URLSearchParams({ instanceId, ...(projectId ? { projectId } : {}), ...(workdir ? { workdir } : {}) });

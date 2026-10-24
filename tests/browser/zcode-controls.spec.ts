@@ -37,15 +37,20 @@ test('uses ZCode switches without a plan dialog, changes only flags and isolates
     });
     const errors:string[]=[]; page.on('pageerror',error=>errors.push(error.message));
     await page.goto(startupUrl);
-    await page.getByRole('button',{name:'扫描本机配置（只读）',exact:true}).click();
+    await page.locator('.empty').getByRole('button',{name:'发现客户端'}).click();
     await page.locator('.tabs').getByRole('button',{name:'Skill',exact:true}).click();
-    await page.getByPlaceholder('搜索名称或来源路径').fill('bundled-readonly');
+    // Verified built-in resources stay hidden under the default display policy.
+    await page.getByLabel('搜索资源').fill('bundled-readonly');
+    await expect(page.getByTestId('include-hidden-search')).toBeVisible();
+    await page.getByTestId('display-options').click();
+    await page.getByTestId('show-builtin-switch').click();
+    await page.keyboard.press('Escape');
     await expect(page.locator('tbody tr')).toContainText('Agent 内置');
     await expect(page.locator('tbody tr').getByRole('switch')).toHaveCount(0);
     await page.getByRole('button',{name:'bundled-readonly',exact:true}).click();
     await expect(page.getByRole('dialog').getByText('Agent 内置来源证据',{exact:true})).toBeVisible();
     await page.getByRole('dialog').getByRole('button',{name:/Close|关闭/}).first().click();
-    await page.getByPlaceholder('搜索名称或来源路径').fill('toggle-local');
+    await page.getByLabel('搜索资源').fill('toggle-local');
     const local=page.locator('tbody tr').filter({has:page.getByRole('button',{name:'toggle-local',exact:true})});
     await expect(page.getByRole('button',{name:'开放启停',exact:true})).toHaveCount(0);
     const localSwitch=local.getByRole('switch',{name:'toggle-local启停',exact:true});
@@ -53,7 +58,7 @@ test('uses ZCode switches without a plan dialog, changes only flags and isolates
     expect(await readFile(config)).toEqual(initial);
     for(const [kind,name] of [['Skill','toggle-local'],['MCP','toggle-mcp'],['插件','toggle-tools']]) {
       await page.locator('.tabs').getByRole('button',{name:kind,exact:true}).click();
-      await page.getByPlaceholder('搜索名称或来源路径').fill(name!);
+      await page.getByLabel('搜索资源').fill(name!);
       const row=page.locator('tbody tr').filter({has:page.getByRole('button',{name:name!,exact:true})});
       const control=row.getByRole('switch',{name:name+'启停',exact:true});
       await expect(control).toBeChecked(); await control.locator('..').click();
@@ -62,11 +67,19 @@ test('uses ZCode switches without a plan dialog, changes only flags and isolates
       expect(JSON.parse(await readFile(config,'utf8')).models).toEqual({token:'PRIVATE_UI_SENTINEL',temperature:0.7});
       await control.locator('..').click(); await expect(row.locator('.config-state')).toHaveText('已启用');
     }
-    await page.getByPlaceholder('搜索名称或来源路径').fill('cache-only');
+    await page.getByLabel('搜索资源').fill('cache-only');
+    // Pure cache records need the cache-only display switch; the entry then stays read-only.
+    await expect(page.getByTestId('include-hidden-search')).toBeVisible();
+    await page.getByTestId('display-options').click();
+    await page.getByTestId('show-cache-only-switch').click();
+    await page.keyboard.press('Escape');
     await expect(page.locator('tbody tr').getByRole('switch')).toHaveCount(0);
-    await expect(page.locator('tbody tr')).toContainText('只读');
+    // Read-only semantics for pure cache records live in the entity detail.
+    await page.locator('tbody tr').getByRole('button', { name: '查看关联配置', exact: true }).click();
+    await expect(page.getByRole('dialog').getByText(/只读/).first()).toBeVisible();
+    await page.getByRole('dialog').getByRole('button', { name: '关闭', exact: true }).click();
     await page.locator('.tabs').getByRole('button',{name:'Skill',exact:true}).click();
-    await page.getByPlaceholder('搜索名称或来源路径').fill('toggle-public');
+    await page.getByLabel('搜索资源').fill('toggle-public');
     await expect(page.locator('tbody tr')).toHaveCount(1);
     await page.getByRole('button',{name:'toggle-public',exact:true}).click();
     const publicSwitch=page.getByRole('dialog').getByRole('switch',{name:'ZCode公共资源启停',exact:true});

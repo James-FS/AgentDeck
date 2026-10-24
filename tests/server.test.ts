@@ -1,9 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { request as httpRequest } from 'node:http';
-import { mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { EventEmitter } from 'node:events';
+import { type FSWatcher, watch as fsWatch } from 'node:fs';
+import { mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createApp } from '../apps/server/src/app.ts';
 import { createStore } from '../packages/storage/src/index.ts';
+import { scanSkillSource } from '../packages/core/src/skill-sources.ts';
+import { addPluginCacheFixture } from './plugin-fixtures.ts';
 import { applyPrepared, type PreparedChange } from '../packages/change-engine/src/index.ts';
 import type { AgentInstance, Catalog, ChangePlan, Operation } from '../packages/contracts/src/index.ts';
 import { copyCatalogFixture, createTestDirectory, fileTreeDigests, removeTestDirectory } from './helpers.ts';
@@ -15,11 +19,13 @@ describe('local API with actual network peers and isolated configuration', () =>
   let origin: string;
   let cookie: string;
   let csrf: string;
+  let openedDirectories: string[];
 
   beforeEach(async () => {
     directory = await createTestDirectory('server-');
     ({ home } = await copyCatalogFixture(directory));
-    app = createApp({ dataDir: path.join(directory, 'data'), homeDir: home, userHomeDir: home, userDiscoveryEnv: {}, demoDir: path.join(directory, 'demo'), discoveryEnv: {}, allowedOrigins: [] });
+    openedDirectories = [];
+    app = createApp({ dataDir: path.join(directory, 'data'), homeDir: home, userHomeDir: home, userDiscoveryEnv: {}, demoDir: path.join(directory, 'demo'), discoveryEnv: {}, allowedOrigins: [], openDirectory: async value => { openedDirectories.push(value); } });
     origin = await app.listen({ host: '127.0.0.1', port: 0 });
     const response = await call('POST', '/api/v1/session/bootstrap', { ticket: app.agentdeckAuth.issueBootstrapTicket() }, false);
     expect(response.status).toBe(200);
@@ -118,6 +124,242 @@ describe('local API with actual network peers and isolated configuration', () =>
     expect((await call('GET', `/api/v1/skills/details?sourceId=${encodeURIComponent(registration.body.id)}&findingPath=${encodeURIComponent(findingPath)}`, undefined, false)).status).toBe(401);
   });
 
+  it('watches an explicitly enabled isolated source and opens only a registered resource reference', async () => {
+    const root = path.join(directory, 'watched-skills');
+    await mkdir(root, { recursive: true });
+    const opened: string[] = [];
+    await app.close();
+    app = createApp({ dataDir: path.join(directory, 'data'), homeDir: home, userHomeDir: home, userDiscoveryEnv: {}, demoDir: path.join(directory, 'demo'), discoveryEnv: {}, allowedOrigins: [], openDirectory: async value => { opened.push(value); } });
+    origin = await app.listen({ host: '127.0.0.1', port: 0 });
+    const boot = await call('POST', '/api/v1/session/bootstrap', { ticket: app.agentdeckAuth.issueBootstrapTicket() }, false);
+    cookie = String(boot.headers['set-cookie']?.[0]).split(';')[0]!; csrf = String(boot.body.csrfToken);
+    const source = await call<{ id: string }>('POST', '/api/v1/skill-sources', { path: root, mode: 'deep' });
+    expect(source.status).toBe(201);
+    const enabled = await call('PUT', `/api/v1/skill-sources/${source.body.id}/watch`, { enabled: true });
+    expect(enabled.body.watchEnabled).toBe(true);
+    const skill = path.join(root, 'created', 'SKILL.md');
+    await mkdir(path.dirname(skill), { recursive: true });
+    await writeFile(skill, '---\nname: watched\ndescription: A watched Skill.\n---\nbody');
+    let catalog: Catalog | null = null;
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      catalog = (await call<Catalog>('GET', '/api/v1/catalog')).body;
+      if (catalog.skillSources?.find(item => item.id === source.body.id)?.report?.recognizedCount === 1) break;
+    }
+    expect(catalog?.skillSources?.find(item => item.id === source.body.id)?.report?.recognizedCount).toBe(1);
+    expect((await call('POST', '/api/v1/resources/open-directory', { kind: 'source', sourceId: source.body.id, findingPath: skill })).status).toBe(200);
+    expect(opened).toEqual([path.dirname(skill)]);
+    expect((await call('POST', '/api/v1/resources/open-directory', { kind: 'source', sourceId: source.body.id, findingPath: path.join(root, 'not-registered', 'SKILL.md') })).status).toBe(404);
+    expect(opened).toHaveLength(1);
+    await call('PUT', `/api/v1/skill-sources/${source.body.id}/watch`, { enabled: false });
+  });
+
+  it('drains a running watcher scan before closing the store and ignores its completion event', async () => {
+    await app.close();
+    const root = path.join(directory, 'drained-watcher');
+    await mkdir(root, { recursive: true });
+    await writeFile(path.join(root, 'SKILL.md'), '---\nname: drain\ndescription: Drain test.\n---\nbody');
+    const watcherEvents = new EventEmitter();
+    let fireChange = () => undefined;
+    let scheduled: { callback: () => void; canceled: boolean } | null = null;
+    let blockScan = false;
+    let announceStarted!: () => void;
+    let releaseScan!: () => void;
+    const scanStarted = new Promise<void>(resolve => { announceStarted = resolve; });
+    const scanGate = new Promise<void>(resolve => { releaseScan = resolve; });
+    const fakeWatch = ((
+      _path: Parameters<typeof fsWatch>[0], _options: Parameters<typeof fsWatch>[1], listener?: Parameters<typeof fsWatch>[2],
+    ) => {
+      fireChange = () => listener?.('rename', null);
+      return Object.assign(watcherEvents, { close: () => undefined }) as unknown as FSWatcher;
+    }) as typeof fsWatch;
+    app = createApp({ dataDir: path.join(directory, 'data'), homeDir: home, userHomeDir: home, userDiscoveryEnv: {}, demoDir: path.join(directory, 'demo'), discoveryEnv: {}, allowedOrigins: [],
+      watchDirectory: fakeWatch,
+      scheduleTimeout: callback => { scheduled = { callback, canceled: false }; return scheduled as unknown as NodeJS.Timeout; },
+      clearScheduledTimeout: timer => { const value = timer as unknown as { canceled: boolean }; value.canceled = true; },
+      skillSourceScanner: async (source, options) => {
+        if (blockScan) { blockScan = false; announceStarted(); await scanGate; }
+        return scanSkillSource(source, options);
+      },
+    });
+    origin = await app.listen({ host: '127.0.0.1', port: 0 });
+    const boot = await call('POST', '/api/v1/session/bootstrap', { ticket: app.agentdeckAuth.issueBootstrapTicket() }, false);
+    cookie = String(boot.headers['set-cookie']?.[0]).split(';')[0]!; csrf = String(boot.body.csrfToken);
+    const source = await call<{ id: string }>('POST', '/api/v1/skill-sources', { path: root, mode: 'deep' });
+    await call('PUT', `/api/v1/skill-sources/${source.body.id}/watch`, { enabled: true });
+    blockScan = true;
+    fireChange();
+    const timer = scheduled;
+    if (!timer) throw new Error('watcher debounce timer was not scheduled');
+    expect(timer.canceled).toBe(false);
+    timer.callback();
+    await scanStarted;
+    let closed = false;
+    const closing = app.close().then(() => { closed = true; });
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(closed).toBe(false);
+    releaseScan();
+    await closing;
+    expect(closed).toBe(true);
+  });
+
+  it('drains watcher error reporting and ignores an entry removed while physical identity is checked', async () => {
+    await app.close();
+    const store = createStore(path.join(directory, 'watch-error-data', 'state.sqlite'));
+    const root = path.join(directory, 'watch-error-root');
+    await mkdir(root, { recursive: true });
+    await writeFile(path.join(root, 'SKILL.md'), '---\nname: error-race\ndescription: Error race.\n---\nbody');
+    const watcherEvents = new EventEmitter();
+    const fakeWatch = (() => Object.assign(watcherEvents, { close: () => undefined }) as unknown as FSWatcher) as typeof fsWatch;
+    app = createApp({ dataDir: path.join(directory, 'watch-error-data'), homeDir: home, userHomeDir: home, userDiscoveryEnv: {}, demoDir: path.join(directory, 'demo'), discoveryEnv: {}, allowedOrigins: [],
+      store, watchDirectory: fakeWatch });
+    origin = await app.listen({ host: '127.0.0.1', port: 0 });
+    const boot = await call('POST', '/api/v1/session/bootstrap', { ticket: app.agentdeckAuth.issueBootstrapTicket() }, false);
+    cookie = String(boot.headers['set-cookie']?.[0]).split(';')[0]!; csrf = String(boot.body.csrfToken);
+    const source = await call<{ id: string }>('POST', '/api/v1/skill-sources', { path: root, mode: 'deep' });
+    await call('PUT', `/api/v1/skill-sources/${source.body.id}/watch`, { enabled: true });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (error: unknown) => unhandled.push(error);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      watcherEvents.emit('error', new Error('isolated-watch-error'));
+      // This models the storage change at the point the error task is awaiting realpath.
+      store.setMetadata('skillSources', '[]');
+      await app.close();
+      expect(unhandled).toEqual([]);
+      expect(store.getMetadata('skillSources')).toBe('[]');
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      store.close();
+    }
+  });
+
+  it.each([false, true])('does not reauthorize a replaced watched root on restart (followLinks=%s)', async followLinksEnabled => {
+    const root = path.join(directory, `restart-root-${followLinksEnabled}`);
+    const outside = path.join(directory, `restart-outside-${followLinksEnabled}`);
+    const originalManifest = path.join(root, 'original', 'SKILL.md');
+    await mkdir(path.dirname(originalManifest), { recursive: true });
+    await writeFile(originalManifest, '---\nname: original-root-skill\ndescription: Original.\n---\noriginal');
+    const registered = await call<{ id: string }>('POST', '/api/v1/skill-sources', { path: root, mode: 'deep', followLinks: followLinksEnabled });
+    const originalRootReal = await realpath(root);
+    expect((await call('PUT', `/api/v1/skill-sources/${registered.body.id}/watch`, { enabled: true })).body.watchStatus).toBe('watching');
+    await app.close();
+    await rm(root, { recursive: true, force: true });
+    await mkdir(outside, { recursive: true });
+    await symlink(outside, root, 'junction');
+    app = createApp({ dataDir: path.join(directory, 'data'), homeDir: home, userHomeDir: home, userDiscoveryEnv: {}, demoDir: path.join(directory, 'demo'), discoveryEnv: {}, allowedOrigins: [] });
+    origin = await app.listen({ host: '127.0.0.1', port: 0 });
+    const boot = await call('POST', '/api/v1/session/bootstrap', { ticket: app.agentdeckAuth.issueBootstrapTicket() }, false);
+    cookie = String(boot.headers['set-cookie']?.[0]).split(';')[0]!; csrf = String(boot.body.csrfToken);
+    let catalog = (await call<Catalog>('GET', '/api/v1/catalog')).body;
+    const findSource = () => {
+      const found = catalog.skillSources?.find(item => item.id === registered.body.id);
+      if (!found) throw new Error('registered Skill source missing from catalog');
+      return found;
+    };
+    let source = findSource();
+    expect(source).toMatchObject({ watchEnabled: true, watchStatus: 'root-changed' });
+    expect(source.report?.rootRealPath).toBe(originalRootReal);
+    const foreignManifest = path.join(outside, 'foreign', 'SKILL.md');
+    await mkdir(path.dirname(foreignManifest), { recursive: true });
+    await writeFile(foreignManifest, '---\nname: foreign-root-skill\ndescription: Foreign.\n---\nforeign');
+    expect((await call('PUT', `/api/v1/skill-sources/${registered.body.id}/watch`, { enabled: false })).body.watchStatus).toBe('disabled');
+    expect((await call('PUT', `/api/v1/skill-sources/${registered.body.id}/watch`, { enabled: true })).body.watchStatus).toBe('root-changed');
+    catalog = (await call<Catalog>('GET', '/api/v1/catalog')).body;
+    source = findSource();
+    expect(source.report?.findings.map(item => item.name)).toContain('original');
+    expect(source.report?.findings.map(item => item.name)).not.toContain('foreign');
+    const manual = await call('POST', `/api/v1/skill-sources/${registered.body.id}/scan`, {});
+    expect(manual.body.report.findings.map((item: { name: string }) => item.name)).toContain('foreign');
+    expect(manual.body.watchStatus).toBe('watching');
+  });
+
+  it('persists validated resource favorites and compares two safely discovered manifests', async () => {
+    const root = path.join(directory, 'compare-library');
+    const leftPath = path.join(root, 'left', 'SKILL.md');
+    const rightPath = path.join(root, 'right', 'SKILL.md');
+    const copyPath = path.join(root, 'copy', 'SKILL.md');
+    await mkdir(path.dirname(leftPath), { recursive: true }); await mkdir(path.dirname(rightPath), { recursive: true });
+    await mkdir(path.dirname(copyPath), { recursive: true });
+    await writeFile(leftPath, '---\nname: same-name\ndescription: Left.\n---\nleft body');
+    await writeFile(rightPath, '---\nname: other-name\ndescription: Right.\n---\nright body');
+    await writeFile(copyPath, '---\nname: same-name\ndescription: Left.\n---\nleft body');
+    const source = await call<{ id: string }>('POST', '/api/v1/skill-sources', { path: root, mode: 'deep' });
+    const preference = { favorites: [{ kind: 'source', sourceId: source.body.id, findingPath: leftPath }], savedFilters: [] };
+    expect((await call('PUT', '/api/v1/resource-preferences', preference)).status).toBe(200);
+    expect((await call('GET', '/api/v1/resource-preferences')).body).toEqual({ ...preference, display: { showBuiltin: false, showCacheOnly: false } });
+    expect((await call('PUT', '/api/v1/resource-preferences', { favorites: [{ path: 'arbitrary' }], savedFilters: [] })).status).toBe(400);
+    const compared = await call('POST', '/api/v1/skills/compare', {
+      left: { kind: 'source', sourceId: source.body.id, findingPath: leftPath },
+      right: { kind: 'source', sourceId: source.body.id, findingPath: rightPath },
+    });
+    expect(compared.status).toBe(200);
+    expect(compared.body).toMatchObject({ samePhysicalSource: false, sameName: false, manifestIdentical: false, bodyEqual: false });
+    const same = await call('POST', '/api/v1/skills/compare', {
+      left: { kind: 'source', sourceId: source.body.id, findingPath: leftPath },
+      right: { kind: 'source', sourceId: source.body.id, findingPath: leftPath },
+    });
+    expect(same.body).toMatchObject({ samePhysicalSource: true, sameName: true, manifestIdentical: true, bodyEqual: true });
+    const identicalCopy = await call('POST', '/api/v1/skills/compare', {
+      left: { kind: 'source', sourceId: source.body.id, findingPath: leftPath },
+      right: { kind: 'source', sourceId: source.body.id, findingPath: copyPath },
+    });
+    expect(identicalCopy.body).toMatchObject({ samePhysicalSource: false, sameName: true, manifestIdentical: true, bodyEqual: true });
+    expect((await call('POST', '/api/v1/skills/compare', { left: { kind: 'source', sourceId: source.body.id, findingPath: path.join(root, 'outside', 'SKILL.md') }, right: { kind: 'source', sourceId: source.body.id, findingPath: rightPath } })).status).toBe(404);
+    expect((await call('POST', '/api/v1/skills/compare', { left: { kind: 'source', sourceId: source.body.id, findingPath: leftPath }, right: { kind: 'source', sourceId: source.body.id, findingPath: rightPath } }, false)).status).toBe(401);
+    expect((await call('POST', '/api/v1/skills/compare', { left: { kind: 'source', sourceId: source.body.id, findingPath: leftPath }, right: { kind: 'source', sourceId: source.body.id, findingPath: rightPath } }, true, { 'X-CSRF-Token': '' })).status).toBe(403);
+  });
+
+  it('opens verified cached plugin directories and their nested MCP declarations through the opener substitute', async () => {
+    const project = path.join(directory, 'project');
+    await mkdir(project, { recursive: true });
+    await addPluginCacheFixture(home, project);
+    const { instance } = await writableCodex();
+    const catalog = await call<Catalog>('GET', '/api/v1/catalog');
+    const plugin = catalog.body.bindings.find(binding => binding.instanceId === instance.id && binding.kind === 'plugin'
+      && binding.pluginId === 'fixture-tools@fixture-market' && binding.pluginVersion === '1.0.0')!;
+    expect(plugin).toBeDefined();
+    const pluginRoot = path.join(home, '.codex', 'plugins', 'cache', 'fixture-market', 'fixture-tools', '1.0.0');
+    expect((await call('POST', '/api/v1/resources/open-directory', { kind: 'binding', bindingId: plugin.id })).status).toBe(200);
+    const child = catalog.body.bindings.find(binding => binding.instanceId === instance.id && binding.kind === 'mcp'
+      && binding.parentId === plugin.id && binding.name === 'cached-docs')!;
+    expect(child).toBeDefined();
+    expect((await call('POST', '/api/v1/resources/open-directory', { kind: 'binding', bindingId: child.id })).status).toBe(200);
+    expect(openedDirectories).toEqual([pluginRoot, pluginRoot]);
+    expect((await call('POST', '/api/v1/resources/open-directory', { kind: 'binding', bindingId: plugin.id }, false)).status).toBe(401);
+    expect((await call('POST', '/api/v1/resources/open-directory', { kind: 'binding', bindingId: plugin.id }, true, { 'X-CSRF-Token': '' })).status).toBe(403);
+    expect((await call('POST', '/api/v1/resources/open-directory', { kind: 'source', sourceId: 'fixture-tools@fixture-market;whoami', findingPath: pluginRoot })).status).toBe(404);
+    expect(openedDirectories).toHaveLength(2);
+  });
+
+  it('persists preferences across a service restart and migrates older saved filters without a favorites flag', async () => {
+    const prefs = { favorites: [{ kind: 'binding', bindingId: 'binding_stable' }], savedFilters: [{ id: 'saved-filter', name: 'Saved', filters: {
+      kind: 'all', search: '', scope: [], owner: [], category: [], source: [], configuration: [], origin: 'all', instanceId: null, projectId: null, favoritesOnly: true,
+    } }] };
+    expect((await call('PUT', '/api/v1/resource-preferences', prefs)).status).toBe(200);
+    await app.close();
+    app = createApp({ dataDir: path.join(directory, 'data'), homeDir: home, userHomeDir: home, userDiscoveryEnv: {}, demoDir: path.join(directory, 'demo'), discoveryEnv: {}, allowedOrigins: [] });
+    origin = await app.listen({ host: '127.0.0.1', port: 0 });
+    const boot = await call('POST', '/api/v1/session/bootstrap', { ticket: app.agentdeckAuth.issueBootstrapTicket() }, false);
+    cookie = String(boot.headers['set-cookie']?.[0]).split(';')[0]!; csrf = String(boot.body.csrfToken);
+    expect((await call('GET', '/api/v1/resource-preferences')).body).toEqual({ ...prefs,
+      display: { showBuiltin: false, showCacheOnly: false },
+      savedFilters: [{ ...prefs.savedFilters[0], filters: { ...prefs.savedFilters[0]!.filters, showBuiltin: false, showCacheOnly: false } }] });
+    await app.close();
+    const legacyStore = createStore(path.join(directory, 'data'));
+    legacyStore.setMetadata('resourcePreferences', JSON.stringify({ favorites: prefs.favorites, savedFilters: [{ id: 'old-filter', name: 'Old', filters: {
+      kind: 'all', search: '', scope: [], owner: [], category: [], source: [], configuration: [], origin: 'all', instanceId: null, projectId: null,
+    } }] }));
+    legacyStore.close();
+    app = createApp({ dataDir: path.join(directory, 'data'), homeDir: home, userHomeDir: home, userDiscoveryEnv: {}, demoDir: path.join(directory, 'demo'), discoveryEnv: {}, allowedOrigins: [] });
+    origin = await app.listen({ host: '127.0.0.1', port: 0 });
+    const restart = await call('POST', '/api/v1/session/bootstrap', { ticket: app.agentdeckAuth.issueBootstrapTicket() }, false);
+    cookie = String(restart.headers['set-cookie']?.[0]).split(';')[0]!; csrf = String(restart.body.csrfToken);
+    expect((await call('GET', '/api/v1/resource-preferences')).body).toMatchObject({ favorites: prefs.favorites,
+      display: { showBuiltin: false, showCacheOnly: false },
+      savedFilters: [{ id: 'old-filter', filters: { favoritesOnly: false, showBuiltin: false, showCacheOnly: false } }] });
+  });
+
   it('searches the parsed manifest name when it differs from the containing folder', async () => {
     const root = path.join(directory, 'manifest-name-search');
     const skillDir = path.join(root, 'folder-name');
@@ -185,6 +427,28 @@ describe('local API with actual network peers and isolated configuration', () =>
     const availability = await call('GET', `/api/v1/skills/availability?instanceId=${encodeURIComponent(instance.id)}`);
     expect(availability.body.independent.find((item: { sourceId: string }) => item.sourceId === source.body.id))
       .toMatchObject({ status: 'unreadable', bound: false });
+  });
+
+  it('rejects details, comparison and directory opening when a non-followed Skill becomes an in-root junction', async () => {
+    const root = path.join(directory, 'link-identity-library');
+    const leftDir = path.join(root, 'left');
+    const rightDir = path.join(root, 'right');
+    await mkdir(leftDir, { recursive: true }); await mkdir(rightDir, { recursive: true });
+    const left = path.join(leftDir, 'SKILL.md'); const right = path.join(rightDir, 'SKILL.md');
+    await writeFile(left, '---\nname: left\ndescription: Left.\n---\nleft body');
+    await writeFile(right, '---\nname: right\ndescription: Right.\n---\nright body');
+    const source = await call<{ id: string }>('POST', '/api/v1/skill-sources', { path: root, mode: 'deep', followLinks: false });
+    await rm(leftDir, { recursive: true });
+    await symlink(rightDir, leftDir, 'junction');
+    const details = await call('GET', `/api/v1/skills/details?sourceId=${encodeURIComponent(source.body.id)}&findingPath=${encodeURIComponent(left)}`);
+    expect(details.status).toBe(403);
+    const compared = await call('POST', '/api/v1/skills/compare', {
+      left: { kind: 'source', sourceId: source.body.id, findingPath: left }, right: { kind: 'source', sourceId: source.body.id, findingPath: right },
+    });
+    expect(compared.status).toBe(403);
+    const opened = await call('POST', '/api/v1/resources/open-directory', { kind: 'source', sourceId: source.body.id, findingPath: left });
+    expect(opened.status).toBe(403);
+    expect(openedDirectories).toEqual([]);
   });
 
   it('keeps configuration-only Skill records inspectable without exposing the config file as Markdown', async () => {

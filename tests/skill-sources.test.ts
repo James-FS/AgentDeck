@@ -42,6 +42,7 @@ describe('custom Skill source scanning', () => {
     await rm(skill);
     const refreshed = await restarted.scanRegisteredSkillSource(registered.id);
     expect(refreshed.report?.recognizedCount).toBe(0);
+    expect(refreshed.changes?.removed).toContain(path.resolve(skill).toLocaleLowerCase('en-US'));
     store.close();
   });
 
@@ -94,6 +95,99 @@ describe('custom Skill source scanning', () => {
     expect(report.continuationPath).toBeNull();
     expect(report.diagnostics.some(message => message.startsWith('，'))).toBe(false);
     expect(report.diagnostics.join(' ')).toContain('每目录 2000 个直接子项上限');
+  });
+
+  it('reuses unchanged manifests, supports a force rescan, and fingerprints body changes', async () => {
+    const root = await tempDir();
+    const manifest = path.join(root, 'SKILL.md');
+    await writeFile(manifest, '---\nname: stable\ndescription: Same metadata.\n---\nfirst body');
+    const store = createStore(path.join(root, 'data'));
+    try {
+      const manager = new ManagerService({ store, adapters: [], homeDir: root });
+      const source = await manager.registerSkillSource({ path: root });
+      const cached = await manager.scanRegisteredSkillSource(source.id);
+      expect(cached.report?.cache).toMatchObject({ reused: 1, read: 0, force: false });
+      const forced = await manager.scanRegisteredSkillSource(source.id, { force: true });
+      expect(forced.report?.cache).toMatchObject({ reused: 0, read: 1, force: true });
+      await writeFile(manifest, '---\nname: stable\ndescription: Same metadata.\n---\nsecond body');
+      const changed = await manager.scanRegisteredSkillSource(source.id);
+      expect(changed.report?.cache?.read).toBe(1);
+      expect(changed.changes?.modified).toEqual([path.resolve(manifest).toLocaleLowerCase('en-US')]);
+    } finally { store.close(); }
+  });
+
+  it('does not let an in-flight scan reopen a listener that was disabled during the scan', async () => {
+    const root = await tempDir();
+    const manifest = path.join(root, 'SKILL.md');
+    await writeFile(manifest, '---\nname: generation\ndescription: Generation guard.\n---\nbody');
+    const store = createStore(path.join(root, 'data'));
+    try {
+      let block = false;
+      let announceStarted!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>(resolve => { announceStarted = resolve; });
+      const gated = new Promise<void>(resolve => { release = resolve; });
+      const manager = new ManagerService({ store, adapters: [], homeDir: root, skillSourceScanner: async (source, options) => {
+        if (block) { announceStarted(); await gated; }
+        return scanSkillSource(source, options);
+      } });
+      const source = await manager.registerSkillSource({ path: root });
+      manager.updateSkillSource(source.id, { watchEnabled: true, watchStatus: 'watching' });
+      block = true;
+      const pending = manager.scanRegisteredSkillSource(source.id);
+      await started;
+      manager.updateSkillSource(source.id, { watchEnabled: false, watchStatus: 'disabled' });
+      release();
+      const result = await pending;
+      expect(result.watchEnabled).toBe(false);
+      expect(result.watchStatus).toBe('disabled');
+    } finally { store.close(); }
+  });
+
+  it('tracks an invalidated manifest as a modification until the file is actually removed', async () => {
+    const root = await tempDir();
+    const manifest = path.join(root, 'SKILL.md');
+    await writeFile(manifest, '---\nname: transitions\ndescription: Valid.\n---\nbody');
+    const store = createStore(path.join(root, 'data'));
+    try {
+      const manager = new ManagerService({ store, adapters: [], homeDir: root });
+      const source = await manager.registerSkillSource({ path: root });
+      await writeFile(manifest, 'invalid frontmatter now');
+      const candidate = await manager.scanRegisteredSkillSource(source.id);
+      expect(candidate.report?.findings[0]?.status).toBe('candidate');
+      expect(candidate.changes?.removed).toEqual([]);
+      expect(candidate.changes?.modified).toContain(path.resolve(manifest).toLocaleLowerCase('en-US'));
+      await rm(manifest);
+      const deleted = await manager.scanRegisteredSkillSource(source.id);
+      expect(deleted.changes?.removed).toContain(path.resolve(manifest).toLocaleLowerCase('en-US'));
+    } finally { store.close(); }
+  });
+
+  it('does not report a partial-scan omission as a new Skill after the next complete scan', async () => {
+    const root = await tempDir();
+    for (const name of ['a', 'b']) {
+      await mkdir(path.join(root, name));
+      await writeFile(path.join(root, name, 'SKILL.md'), `---\nname: ${name}\ndescription: ${name}.\n---\n${name}`);
+    }
+    let partial = false;
+    const store = createStore(path.join(root, 'data'));
+    try {
+      const manager = new ManagerService({ store, adapters: [], homeDir: root, skillSourceScanner: async (source, options) => {
+        const report = await scanSkillSource(source, options);
+        if (!partial) return report;
+        const findings = report.findings.filter(item => item.name !== 'b');
+        return { ...report, status: 'partial', findings, recognizedCount: findings.filter(item => item.status === 'recognized').length,
+          candidateCount: findings.filter(item => item.status === 'candidate').length, diagnostics: ['partial fixture'] };
+      } });
+      const source = await manager.registerSkillSource({ path: root, mode: 'deep' });
+      partial = true;
+      const incomplete = await manager.scanRegisteredSkillSource(source.id);
+      expect(incomplete.changes?.removed).toEqual([]);
+      partial = false;
+      const recovered = await manager.scanRegisteredSkillSource(source.id);
+      expect(recovered.changes?.added).toEqual([]);
+      expect(recovered.changes?.removed).toEqual([]);
+    } finally { store.close(); }
   });
 
   it('keeps templates under a recognized Skill package auxiliary, while allowing an explicitly registered template root', async () => {

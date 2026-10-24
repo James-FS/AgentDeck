@@ -12,6 +12,8 @@ const MAX_FRONTMATTER = 128 * 1024;
 const EXAMPLE_SEGMENTS = new Set(['scripts', 'references', 'examples', 'templates', 'tests', 'test', 'assets']);
 const NOISE_DIRECTORIES = new Set(['.git', 'node_modules', '.next', 'dist', 'build', '.turbo', '.pnpm-store', '.venv', 'vendor']);
 const EXPLICIT_HIDDEN_ENTRIES = new Set(['.agents', '.claude', '.codex', '.dsh', '.zcode', '.cursor', '.opencode', '.claude-plugin']);
+const manifestCache = new Map<string, { status: SkillSourceFinding['status']; reason: string; description: string | null; valid: boolean; hash: string }>();
+const MAX_CACHE_ENTRIES = 8_000;
 
 export function skillSourceId(sourcePath: string): string {
   return `skill_source_${createHash('sha256').update(path.resolve(sourcePath).toLocaleLowerCase('en-US')).digest('hex').slice(0, 24)}`;
@@ -22,7 +24,12 @@ function isInside(root: string, target: string): boolean {
   return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
-export async function scanSkillSource(source: SkillSource): Promise<SkillSourceReport> {
+function samePhysicalPath(left: string, right: string): boolean {
+  return process.platform === 'win32' ? left.toLocaleLowerCase('en-US') === right.toLocaleLowerCase('en-US') : left === right;
+}
+
+export async function scanSkillSource(source: SkillSource, options: { force?: boolean; expectedRootRealPath?: string } = {}): Promise<SkillSourceReport> {
+  if (options.force) clearSkillSourceCache(source.id);
   const rootPath = path.resolve(source.path);
   const findings: SkillSourceFinding[] = [];
   const diagnostics: string[] = [];
@@ -31,6 +38,8 @@ export async function scanSkillSource(source: SkillSource): Promise<SkillSourceR
   const limits = { maxDepth, maxDirectories: MAX_DIRECTORIES, maxEntriesPerDirectory: MAX_ENTRIES_PER_DIRECTORY,
     maxManifestBytes: MAX_FILES, maxFrontmatterBytes: MAX_FRONTMATTER };
   let visitedDirectories = 0;
+  let cacheReused = 0;
+  let filesRead = 0;
   let truncatedAt: string | null = null;
   let continuationPath: string | null = null;
   const truncationReasons: string[] = [];
@@ -46,6 +55,12 @@ export async function scanSkillSource(source: SkillSource): Promise<SkillSourceR
     const rootStat = await stat(rootPath);
     if (!rootStat.isDirectory()) throw new Error('登记路径不是目录。');
     rootReal = await realpath(rootPath);
+    if (options.expectedRootRealPath && !samePhysicalPath(rootReal, options.expectedRootRealPath)) {
+      return { status: 'failed', rootPath, rootRealPath: options.expectedRootRealPath, candidateCount: 0, recognizedCount: 0,
+        skippedCount: 0, visitedDirectories: 0, limits, truncatedAt: null, continuationPath: null,
+        diagnostics: ['登记目录物理身份与监听授权不一致；后台监听未重新授权扫描。'], findings,
+        cache: { reused: 0, read: 0, force: options.force ?? false } };
+    }
   } catch (error) {
     return { status: 'failed', rootPath, candidateCount: 0, recognizedCount: 0, skippedCount: 0,
       visitedDirectories: 0, limits, truncatedAt: null, continuationPath: null,
@@ -107,28 +122,49 @@ export async function scanSkillSource(source: SkillSource): Promise<SkillSourceR
       let status: SkillSourceFinding['status'] = 'candidate';
       let reason = 'SKILL.md 存在，但文件格式或必需字段无效。';
       let description: string | null = null;
+      let contentHash: string | undefined;
+      let cacheKey: string | undefined;
       try {
         const info = await lstat(logicalManifest);
         if (!info.isFile() || info.size > MAX_FILES) throw new Error('manifest 不是普通文件或超过 2 MiB。');
-        const text = (await readFile(logicalManifest, 'utf8')).replace(/^\uFEFF/, '');
-        const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text)?.[1];
-        if (!frontmatter) throw new Error('缺少有效的 YAML frontmatter 起止标记。');
-        if (Buffer.byteLength(frontmatter, 'utf8') > MAX_FRONTMATTER) throw new Error('YAML frontmatter 超过 128 KiB。');
-        const document = parseDocument(frontmatter, { uniqueKeys: true, schema: 'core' });
-        if (document.errors.length || !isMap(document.contents)) throw new Error('YAML frontmatter 无效或不是对象。');
-        const nameNode = document.contents.get('name', true);
-        const descriptionNode = document.contents.get('description', true);
-        const nameValue: unknown = isScalar(nameNode) ? (nameNode as { value: unknown }).value : null;
-        const descriptionValue: unknown = isScalar(descriptionNode) ? (descriptionNode as { value: unknown }).value : null;
-        if (typeof nameValue !== 'string' || !nameValue.trim() || typeof descriptionValue !== 'string' || !descriptionValue.trim()) {
-          throw new Error('frontmatter 缺少有效的字符串 name 或 description。');
+        cacheKey = `${source.id}|${path.resolve(path.join(real, manifestName))}|${String(info.dev)}|${String(info.ino)}|${info.size}|${info.mtimeMs}|${info.ctimeMs}|${source.mode}|${source.followLinks}|${logicalParts.join('/')}`;
+        const cached = options.force ? undefined : manifestCache.get(cacheKey);
+        if (cached) {
+          cacheReused += 1;
+          ({ status, reason, description, valid: validSkillPackage } = cached);
+          contentHash = cached.hash;
+        } else {
+          filesRead += 1;
+          const bytes = await readFile(logicalManifest);
+          contentHash = createHash('sha256').update(bytes).digest('hex');
+          const text = bytes.toString('utf8').replace(/^\uFEFF/, '');
+          const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text)?.[1];
+          if (!frontmatter) throw new Error('缺少有效的 YAML frontmatter 起止标记。');
+          if (Buffer.byteLength(frontmatter, 'utf8') > MAX_FRONTMATTER) throw new Error('YAML frontmatter 超过 128 KiB。');
+          const document = parseDocument(frontmatter, { uniqueKeys: true, schema: 'core' });
+          if (document.errors.length || !isMap(document.contents)) throw new Error('YAML frontmatter 无效或不是对象。');
+          const nameNode = document.contents.get('name', true);
+          const descriptionNode = document.contents.get('description', true);
+          const nameValue: unknown = isScalar(nameNode) ? (nameNode as { value: unknown }).value : null;
+          const descriptionValue: unknown = isScalar(descriptionNode) ? (descriptionNode as { value: unknown }).value : null;
+          if (typeof nameValue !== 'string' || !nameValue.trim() || typeof descriptionValue !== 'string' || !descriptionValue.trim()) {
+            throw new Error('frontmatter 缺少有效的字符串 name 或 description。');
+          }
+          reason = `识别为 Skill（name: ${nameValue.trim().slice(0, 120)}）。`;
+          status = 'recognized';
+          validSkillPackage = true;
+          description = descriptionValue.trim().slice(0, 500);
+          manifestCache.set(cacheKey, { status, reason, description, valid: validSkillPackage, hash: contentHash });
         }
-        const name = nameValue.trim().slice(0, 120);
-        reason = `识别为 Skill（name: ${name}）。`;
-        status = 'recognized';
-        validSkillPackage = true;
-        description = descriptionValue.trim().slice(0, 500);
-      } catch (error) { reason = error instanceof Error ? error.message : reason; }
+        // Keep this bounded even when a long-running service scans many unique roots.
+        while (manifestCache.size > MAX_CACHE_ENTRIES) manifestCache.delete(manifestCache.keys().next().value!);
+      } catch (error) {
+        reason = error instanceof Error ? error.message : reason;
+        if (cacheKey && contentHash && !options.force) {
+          manifestCache.set(cacheKey, { status: 'candidate', reason, description: null, valid: false, hash: contentHash });
+          while (manifestCache.size > MAX_CACHE_ENTRIES) manifestCache.delete(manifestCache.keys().next().value!);
+        }
+      }
       const auxiliarySegment = logicalParts.find(part => {
         const normalized = part.toLocaleLowerCase('en-US');
         return EXAMPLE_SEGMENTS.has(normalized) && (normalized !== 'assets' || insideSkillPackage);
@@ -140,7 +176,8 @@ export async function scanSkillSource(source: SkillSource): Promise<SkillSourceR
           : '位于 scripts/references/examples 等示例或辅助目录，避免误判为可用 Skill。';
         validSkillPackage = false;
       }
-      findings.push({ logicalPath: logicalManifest, actualPath: path.join(real, manifestName), name: path.basename(logical), status, reason, description });
+      findings.push({ logicalPath: logicalManifest, actualPath: path.join(real, manifestName), name: path.basename(logical), status, reason, description,
+        ...(contentHash ? { contentHash } : {}) });
     }
     const canDescend = (entry: typeof entries[number]) => {
       if (entry.isSymbolicLink()) return source.followLinks;
@@ -211,5 +248,11 @@ export async function scanSkillSource(source: SkillSource): Promise<SkillSourceR
   const recognizedCount = findings.filter(item => item.status === 'recognized').length;
   const skippedCount = findings.filter(item => item.status === 'skipped').length;
   return { status: diagnostics.length || truncatedAt ? 'partial' : 'complete', rootPath, rootRealPath: rootReal, candidateCount, recognizedCount,
-    skippedCount, visitedDirectories, limits, truncatedAt, continuationPath, diagnostics, findings };
+    skippedCount, visitedDirectories, limits, truncatedAt, continuationPath, diagnostics, findings,
+    cache: { reused: cacheReused, read: filesRead, force: options.force ?? false } };
+}
+
+export function clearSkillSourceCache(sourceId?: string): void {
+  if (!sourceId) { manifestCache.clear(); return; }
+  for (const key of manifestCache.keys()) if (key.startsWith(`${sourceId}|`)) manifestCache.delete(key);
 }

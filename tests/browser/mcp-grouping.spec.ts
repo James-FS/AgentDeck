@@ -36,7 +36,7 @@ test('folds one MCP service across Agent/project bindings and switches only the 
     });
     const session = page.waitForResponse(response=>response.url().endsWith('/api/v1/session/bootstrap') && response.ok());
     await page.goto(url); const csrfToken=(await (await session).json()).csrfToken as string;
-    await page.getByRole('button',{name:'扫描本机配置（只读）',exact:true}).click();
+    await page.locator('.empty').getByRole('button',{name:'发现客户端'}).click();
     await page.evaluate(async ({rootPath,csrfToken})=>{
       const headers={'content-type':'application/json','x-csrf-token':csrfToken};
       const registered=await fetch('/api/v1/projects',{method:'POST',headers,body:JSON.stringify({rootPath,name:'MCP project'})});
@@ -44,45 +44,41 @@ test('folds one MCP service across Agent/project bindings and switches only the 
       const scan=await fetch('/api/v1/scans',{method:'POST',headers,body:JSON.stringify({scanRegisteredProjects:true})});
       if(!scan.ok)throw new Error('scan failed');
     },{rootPath:project,csrfToken});
-    await page.getByRole('button',{name:'刷新资源',exact:true}).click();
+    await page.getByRole('button',{name:'刷新当前页面数据',exact:true}).click();
     await page.locator('.tabs').getByRole('button',{name:'MCP',exact:true}).click();
-    await page.getByPlaceholder('搜索名称或来源路径').fill('codely-unity');
+    await page.getByLabel('搜索资源').fill('codely-unity');
     await expect(page.locator('tbody tr')).toHaveCount(1);
     await expect(page.locator('tbody')).toContainText('3 条绑定');
     await expect(page.locator('tbody')).toContainText('配置不同（2 组）');
     await expect(page.locator('tbody')).toContainText('Claude Code');
-    await expect(page.locator('tbody')).toContainText('项目级');
+    await expect(page.locator('tbody')).toContainText('MCP project');
     await expect(page.locator('tbody tr').getByRole('switch')).toHaveCount(0);
-    await page.getByRole('button',{name:'codely-unity服务详情',exact:true}).click();
-    await expect(page.getByRole('dialog').locator('.mcp-agent-bindings .plan-path')).toHaveCount(3);
-    await expect(page.getByRole('dialog')).toContainText(entry);
-    await expect(page.getByRole('dialog')).not.toContainText('PRIVATE_GROUP_SECRET');
-    await expect(page.getByRole('dialog')).not.toContainText('DIFFERENT_GROUP_SECRET');
-    await page.getByRole('dialog').getByRole('button',{name:/Close|关闭/}).first().click();
-    await page.getByRole('button',{name:'展开 MCP 绑定',exact:true}).click();
-    await expect(page.locator('tbody tr')).toHaveCount(4);
-    const zcodeRow=page.locator('tbody tr').filter({has:page.getByRole('button',{name:'codely-unity · ZCode · 配置绑定',exact:true})});
-    const control=zcodeRow.getByRole('switch',{name:'codely-unity启停',exact:true});
+    // Manage the folded service in the entity detail: every configuration binding
+    // keeps its own state and its own switch.
+    await page.getByRole('button',{name:'管理配置（3）',exact:true}).click();
+    const groupDialog = page.getByRole('dialog');
+    await expect(groupDialog.locator('.entity-binding')).toHaveCount(3);
+    await expect(groupDialog).toContainText(entry);
+    await expect(groupDialog).not.toContainText('PRIVATE_GROUP_SECRET');
+    await expect(groupDialog).not.toContainText('DIFFERENT_GROUP_SECRET');
+    const control=groupDialog.locator('.entity-binding').filter({hasText:'ZCode'}).getByRole('switch',{name:'codely-unity启停',exact:true});
     await expect(control).toBeChecked(); await control.locator('..').click(); await expect(control).not.toBeChecked();
     expect(await readFile(codex,'utf8')).toBe(codexText); expect(await readFile(claude,'utf8')).toBe(claudeText);
     expect(await readFile(entry,'utf8')).toBe('never execute');
     expect(JSON.parse(await readFile(zcode,'utf8')).mcp.servers['codely-unity']).toEqual({...declaration,enable:false});
-    const header=page.locator('tbody tr').filter({has:page.getByRole('button',{name:'codely-unity',exact:true})});
-    await expect(header.locator('.config-state')).toHaveText('未确定');
-    await page.getByRole('button',{name:'收起 MCP 绑定',exact:true}).click();
-    await page.locator('.table-scroll').evaluate(element=>{element.scrollLeft=0;});
+    await groupDialog.getByRole('button',{name:'关闭',exact:true}).click();
     await page.screenshot({path:'work/browser-proof/mcp-service-group.png',fullPage:true});
-    await page.getByPlaceholder('搜索名称或来源路径').fill('blender');
+    await page.getByLabel('搜索资源').fill('blender');
     await expect(page.locator('tbody tr')).toHaveCount(1);
     await expect(page.locator('tbody')).toContainText('2 条绑定');
-    await page.getByRole('button',{name:'blender服务详情',exact:true}).click();
+    await page.getByRole('button',{name:'管理配置（2）',exact:true}).click();
     const blenderDialog = page.getByRole('dialog');
-    await expect(blenderDialog.locator('.mcp-agent-bindings .plan-path')).toHaveCount(2);
+    await expect(blenderDialog.locator('.entity-binding')).toHaveCount(2);
     await expect(blenderDialog).toContainText('2.0.4');
     await expect(blenderDialog).toContainText('实际解析版本未验证');
     await expect(blenderDialog).toContainText(blenderEntry);
-    await expect(blenderDialog.locator('.plan-path').filter({hasText:'ZCode'}).locator('.config-state')).toHaveText('已禁用');
-    await expect(blenderDialog.locator('.plan-path').filter({hasText:'Codex'}).locator('.config-state')).toHaveText('已启用');
+    await expect(blenderDialog.locator('.entity-binding').filter({hasText:'ZCode'}).locator('.config-state')).toHaveText('已禁用');
+    await expect(blenderDialog.locator('.entity-binding').filter({hasText:'Codex'}).locator('.config-state')).toHaveText('已启用');
     expect(await readFile(blenderEntry,'utf8')).toBe('never execute Blender');
   } finally {
     if(server&&server.exitCode===null){server.kill();await new Promise(resolve=>server!.once('exit',resolve));}

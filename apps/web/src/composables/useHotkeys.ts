@@ -3,11 +3,11 @@ import { useUiStore } from '../ui-store';
 
 export function useHotkeys() {
   const ui = useUiStore();
-  // The search input is still located through its panel-tools class because the input
-  // lives inside ResourcesPage; switch to a template ref if that selector ever breaks.
+  // The search input is located through its dedicated class inside the resource
+  // toolbar; switch to a template ref if that selector ever breaks.
   function onGlobalKeydown(event: KeyboardEvent) {
     if (event.defaultPrevented) return;
-    const search = document.querySelector<HTMLElement>('.panel-tools .el-input__inner');
+    const search = document.querySelector<HTMLElement>('.filter-row .search-input .el-input__inner');
     if (event.key === '/') {
       const target = event.target as HTMLElement | null;
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable || target.tagName === 'SELECT')) return;

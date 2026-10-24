@@ -40,12 +40,11 @@ test('registers a writable Codex root, checks its version and previews/applies/r
     const errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message));
     await page.goto(startupUrl);
-    await page.getByRole('button', { name: '扫描本机配置（只读）', exact: true }).click();
-    const search = page.getByPlaceholder('搜索名称或来源路径');
+    await page.locator('.empty').getByRole('button', { name: '发现客户端' }).click();
+    const search = page.getByLabel('搜索资源');
     await search.fill('Grouped Browser Title');
     const groupedRow = page.getByRole('row').filter({ has: page.getByRole('button', { name: 'Grouped Browser Title', exact: true }) });
     await expect(groupedRow.getByText('仅磁盘发现', { exact: true })).toBeVisible();
-    await expect(groupedRow.getByText('分组路径：collection/grouped-browser', { exact: false })).toBeVisible();
     await expect(groupedRow.getByText('Browser fixture description.', { exact: false })).toBeVisible();
     await groupedRow.locator('.resource-detail-link').click();
     await expect(page.getByRole('dialog').getByText('仅磁盘发现 · 客户端可见性未验证', { exact: true })).toBeVisible();
@@ -55,7 +54,7 @@ test('registers a writable Codex root, checks its version and previews/applies/r
     await expect(page.getByRole('dialog')).toBeHidden();
     await search.fill('local-control');
     let row = page.getByRole('row').filter({ has: page.getByRole('button', { name: 'local-control', exact: true }) });
-    await expect(row.getByRole('button', { name: '计划停用', exact: true })).toHaveCount(0);
+    await expect(row.getByRole('button', { name: '预览修改', exact: true })).toHaveCount(0);
     await page.getByRole('button', { name: /^Agent 实例/ }).click();
     await page.getByRole('button', { name: '登记实例', exact: true }).first().click();
     const registration = page.getByRole('dialog');
@@ -68,18 +67,18 @@ test('registers a writable Codex root, checks its version and previews/applies/r
     await expect(card.getByText('0.159.2', { exact: false }).first()).toBeVisible();
     await page.getByRole('button', { name: '资源管理', exact: true }).click();
     await search.fill('Grouped Browser Title');
-    await expect(groupedRow.getByRole('button', { name: '计划停用', exact: true })).toHaveCount(0);
+    await expect(groupedRow.getByRole('button', { name: '预览修改', exact: true })).toHaveCount(0);
     for (const name of ['local-control', 'browser-plugin']) {
       await page.getByRole('button', { name: '资源管理', exact: true }).click();
       await search.fill(name);
       row = page.getByRole('row').filter({ has: page.getByRole('button', { name, exact: true }) });
-      await expect(row.getByRole('button', { name: '计划停用', exact: true })).toBeVisible();
+      await expect(row.getByRole('button', { name: '预览修改', exact: true })).toBeVisible();
       await row.locator('.resource-detail-link').click();
-      await expect(page.getByRole('dialog').getByText('单项配置开关可用', { exact: true })).toBeVisible();
+      await expect(page.getByRole('dialog').getByText('单项配置开关可用', { exact: false })).toBeVisible();
       await expect(page.getByRole('dialog').locator('.evidence-head b').filter({ hasText: /^原生配置复读 · 已验证/ })).toBeVisible();
       await page.getByRole('dialog').getByRole('button', { name: /Close|关闭/i }).first().click();
       await expect(page.getByRole('dialog')).toBeHidden();
-      await row.getByRole('button', { name: '计划停用', exact: true }).click();
+      await row.getByRole('button', { name: '预览修改', exact: true }).click();
       await expect(page.getByText('资源启停预览', { exact: true })).toBeVisible();
       await expect(page.getByRole('dialog').getByText(configPath, { exact: true })).toBeVisible();
       if (name === 'browser-plugin') await expect(page.getByRole('dialog').getByText('plugin-child', { exact: true })).toBeVisible();
@@ -91,8 +90,8 @@ test('registers a writable Codex root, checks its version and previews/applies/r
       await expect(row.getByText('已禁用', { exact: true })).toBeVisible();
       await mkdir('work/browser-proof', { recursive: true });
       await page.screenshot({ path: `work/browser-proof/basic-${name}.png`, fullPage: true });
-      await page.getByRole('button', { name: /^操作记录/ }).click();
-      await page.getByRole('button', { name: '创建恢复计划', exact: true }).first().click();
+      await page.getByRole('button', { name: /^配置操作记录/ }).click();
+      await page.getByRole('button', { name: '恢复此修改', exact: true }).first().click();
       await page.getByRole('button', { name: '确认应用计划', exact: true }).click();
       await expect(page.getByText('操作结果：succeeded')).toBeVisible();
       await page.getByRole('button', { name: '关闭', exact: true }).click();

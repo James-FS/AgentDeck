@@ -7,5 +7,5 @@ export const pages = [
   { id: 'resources' as const, label: '资源管理', icon: Box },
   { id: 'instances' as const, label: 'Agent 实例', icon: Connection },
   { id: 'projects' as const, label: '项目空间', icon: Folder },
-  { id: 'operations' as const, label: '操作记录', icon: Clock },
+  { id: 'operations' as const, label: '配置操作记录', icon: Clock },
 ];

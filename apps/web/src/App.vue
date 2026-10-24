@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted } from 'vue';
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted } from 'vue';
 import { storeToRefs } from 'pinia';
-import { FolderAdd, InfoFilled, Plus, Refresh, Search } from '@element-plus/icons-vue';
+import { CaretBottom, FolderAdd, Plus, Refresh, Search } from '@element-plus/icons-vue';
 import { useAppStore } from './store';
 import { useUiStore } from './ui-store';
 import { useEventStream } from './composables/useEventStream';
@@ -13,15 +13,15 @@ import AppSidebar from './components/AppSidebar.vue';
 import AppTopbar from './components/AppTopbar.vue';
 import ConnectGate from './components/ConnectGate.vue';
 import PageHeading from './components/PageHeading.vue';
-import OverviewPage from './components/pages/OverviewPage.vue';
-import ResourcesPage from './components/pages/ResourcesPage.vue';
-import InstancesPage from './components/pages/InstancesPage.vue';
-import ProjectsPage from './components/pages/ProjectsPage.vue';
-import OperationsPage from './components/pages/OperationsPage.vue';
-import InstanceFormDrawer from './components/drawers/InstanceFormDrawer.vue';
-import ProjectFormDrawer from './components/drawers/ProjectFormDrawer.vue';
-import PlanDrawer from './components/drawers/PlanDrawer.vue';
-import BindingDrawer from './components/drawers/BindingDrawer.vue';
+const OverviewPage = defineAsyncComponent(() => import('./components/pages/OverviewPage.vue'));
+const ResourcesPage = defineAsyncComponent(() => import('./components/pages/ResourcesPage.vue'));
+const InstancesPage = defineAsyncComponent(() => import('./components/pages/InstancesPage.vue'));
+const ProjectsPage = defineAsyncComponent(() => import('./components/pages/ProjectsPage.vue'));
+const OperationsPage = defineAsyncComponent(() => import('./components/pages/OperationsPage.vue'));
+const InstanceFormDrawer = defineAsyncComponent(() => import('./components/drawers/InstanceFormDrawer.vue'));
+const ProjectFormDrawer = defineAsyncComponent(() => import('./components/drawers/ProjectFormDrawer.vue'));
+const PlanDrawer = defineAsyncComponent(() => import('./components/drawers/PlanDrawer.vue'));
+const BindingDrawer = defineAsyncComponent(() => import('./components/drawers/BindingDrawer.vue'));
 import { scanNotice } from './scan-state';
 
 const store = useAppStore();
@@ -30,7 +30,7 @@ const scanWarning = computed(() => store.catalog?.lastScan && store.catalog.last
 const { page, drawer, actionBusy, selectedBinding } = storeToRefs(ui);
 const { drawerVisibility, openInstanceForm, openProjectForm } = ui;
 const { activePlan } = usePlanFlow();
-const { refresh, scan } = useScanActions();
+const { refresh, scanClients, discoverClients } = useScanActions();
 const { loadOperations } = useOperations();
 const { openEvents, closeEvents } = useEventStream();
 useHotkeys();
@@ -56,7 +56,7 @@ onBeforeUnmount(() => { closeEvents(); });
 
       <section v-else class="content">
         <PageHeading>
-          <template #actions><template v-if="page === 'instances'"><el-button @click="scan(true, true)" :loading="actionBusy"><el-icon><Search /></el-icon>发现客户端</el-button><el-button type="primary" @click="openInstanceForm"><el-icon><Plus /></el-icon>登记实例</el-button></template><el-button v-if="page === 'projects'" type="primary" @click="openProjectForm"><el-icon><FolderAdd /></el-icon>登记项目</el-button><template v-if="page === 'resources' || page === 'overview'"><el-button @click="scan(false)" :loading="actionBusy"><el-icon><Refresh /></el-icon>重新扫描已登记实例</el-button><el-button type="primary" @click="scan(true, true)" :loading="actionBusy"><el-icon><Search /></el-icon>发现并扫描本机资源</el-button></template></template>
+          <template #actions><template v-if="page === 'instances'"><el-button @click="discoverClients" :loading="actionBusy"><el-icon><Search /></el-icon>发现客户端</el-button><el-button type="primary" @click="openInstanceForm"><el-icon><Plus /></el-icon>登记实例</el-button></template><el-button v-if="page === 'projects'" type="primary" @click="openProjectForm"><el-icon><FolderAdd /></el-icon>登记项目</el-button><template v-if="page === 'resources'"><el-button type="primary" data-testid="scan-clients" @click="scanClients" :loading="actionBusy"><el-icon><Refresh /></el-icon>扫描客户端</el-button><el-dropdown trigger="click"><el-button :loading="actionBusy" :aria-label="'发现客户端'"><el-icon><Search /></el-icon>发现客户端<el-icon class="el-icon--right"><CaretBottom /></el-icon></el-button><template #dropdown><el-dropdown-item @click="discoverClients">发现本机客户端并扫描用户级配置</el-dropdown-item></template></el-dropdown></template></template>
         </PageHeading>
         <div v-if="store.refreshError" class="inline-error"><el-icon><InfoFilled /></el-icon><span>{{ store.refreshError }}</span><el-button text @click="refresh">重试</el-button></div>
         <el-alert v-if="scanWarning" data-testid="scan-warning" :title="scanWarning" :type="store.catalog?.lastScan?.status === 'failed' ? 'error' : 'warning'" :closable="false" show-icon />

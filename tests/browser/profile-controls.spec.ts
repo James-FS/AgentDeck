@@ -27,10 +27,10 @@ test('switches Claude and DSH user plugins directly while preserving unrelated c
     });
     const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
     await page.goto(url);
-    await page.getByRole('button', { name: '扫描本机配置（只读）', exact: true }).click();
+    await page.locator('.empty').getByRole('button', { name: '发现客户端' }).click();
     await page.locator('.tabs').getByRole('button', { name: '插件', exact: true }).click();
     for (const name of ['claude-toggle', 'dsh-toggle']) {
-      await page.getByPlaceholder('搜索名称或来源路径').fill(name);
+      await page.getByLabel('搜索资源').fill(name);
       const row = page.locator('tbody tr').filter({ has: page.getByRole('button', { name, exact: true }) });
       const control = row.getByRole('switch', { name: name+'启停', exact: true });
       await expect(control).toBeChecked(); await control.locator('..').click();

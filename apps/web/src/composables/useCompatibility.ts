@@ -36,7 +36,7 @@ export function useCompatibility() {
     versionCheckBusy.value = report.instanceId;
     try {
       const updated = await api.checkVersion(report.instanceId);
-      store.compatibility = updated;
+      store.setCompatibility(updated);
       const row = updated.clients.find((client) => client.id === report.id);
       await store.refresh();
       ElMessage.success(row?.versionEvidence ? `已识别 CLI 版本 ${row.versionEvidence.version}` : row?.executableCandidate ? '已刷新程序候选；当前未识别版本签名' : '未发现可用的 PATH 程序候选');

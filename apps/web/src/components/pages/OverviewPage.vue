@@ -26,7 +26,7 @@ const { instanceCountFor, resourceCountFor, adapterStateFor } = useCompatibility
       </div>
     </section>
     <section class="panel overview-panel">
-      <div class="panel-heading"><div><h2>最近操作</h2><small>成功操作可在操作记录中创建恢复计划。</small></div><el-button size="small" @click="goTo('operations')">查看全部</el-button></div>
+      <div class="panel-heading"><div><h2>最近操作</h2><small>成功操作可在配置操作记录中恢复此修改。</small></div><el-button size="small" @click="goTo('operations')">查看全部</el-button></div>
       <div v-if="operations.length" class="recent-ops">
         <div v-for="op in operations.slice(0,5)" :key="op.id" class="recent-op">
           <span :class="['op-status', op.status]">{{ op.status==='succeeded'?'已完成':op.status==='conflict'?'检测到冲突':'失败' }}</span>

@@ -62,7 +62,7 @@ test('verifies installed client sources through the built UI without modifying t
     page.on('pageerror', error => errors.push(error.message));
     await page.goto(startupUrl);
     await expect(page.getByRole('heading', { name: '资源管理', exact: true })).toBeVisible();
-    await page.getByRole('button', { name: '扫描本机配置（只读）', exact: true }).click();
+    await page.locator('.empty').getByRole('button', { name: '发现客户端' }).click();
     await expect(page.locator('.resource-detail-link').first()).toBeVisible();
     const response = await page.request.get(new URL('/api/v1/catalog', startupUrl).href);
     expect(response.ok()).toBe(true);
@@ -114,7 +114,7 @@ test('verifies installed client sources through the built UI without modifying t
     await page.screenshot({ path: 'work/browser-proof/real-resources.png', fullPage: true });
     if (catalog.bindings.some(item => item.name === 'sites-building' && item.parentId)) {
       await page.getByRole('button', { name: 'Skill', exact: true }).click();
-      await page.getByPlaceholder('搜索名称或来源路径').fill('sites-building');
+      await page.getByLabel('搜索资源').fill('sites-building');
       const parent = page.getByRole('row').filter({ has: page.getByRole('button', { name: 'sites', exact: true }) }).first();
       await parent.getByRole('button', { name: /展开/ }).click();
       const child = page.getByRole('row').filter({ has: page.getByRole('button', { name: 'sites-building', exact: true }) });

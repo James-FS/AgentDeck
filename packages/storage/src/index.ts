@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { AgentInstance, Binding, Catalog, ChangePlan, Operation, Project, ScanOutcome } from '@agentdeck/contracts';
+import type { AgentInstance, Binding, BindingChangeSet, Catalog, ChangePlan, Operation, Project, ScanOutcome } from '@agentdeck/contracts';
 
 export interface StoredPlan { dto: ChangePlan; privateData: unknown }
 
@@ -37,6 +37,7 @@ export class AgentDeckStore {
       bindings: (this.db.prepare('SELECT json FROM bindings ORDER BY rowid').all() as Array<{ json: string }>).map(row => parse<Binding>(row.json)),
       lastScanAt: this.getMetadata('lastScanAt'),
       lastScan: this.getMetadata('lastScan') ? parse<ScanOutcome>(this.getMetadata('lastScan')) : null,
+      bindingChanges: this.getMetadata('bindingChanges') ? parse<BindingChangeSet[]>(this.getMetadata('bindingChanges')) : [],
     };
   }
 

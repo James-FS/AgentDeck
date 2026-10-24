@@ -17,7 +17,7 @@ async function saveProject() {
   actionBusy.value = true;
   try {
     await api.registerProject({ name: projectForm.name.trim() || undefined, rootPath: projectForm.rootPath.trim() });
-    await store.refresh(); ElMessage.success('项目空间已登记'); drawer.value = null;
+    await store.refresh(true); ElMessage.success('项目空间已登记'); drawer.value = null;
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '登记失败'); }
   finally { actionBusy.value = false; }
 }

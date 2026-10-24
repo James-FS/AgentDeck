@@ -18,7 +18,7 @@ async function saveInstance() {
   try {
     const registered = await api.registerInstance({ agentId: instanceForm.agentId, name: instanceForm.name.trim() || undefined, configRoot: instanceForm.configRoot.trim(), writable: ['codex','zcode','claude-code','deepseek-harness'].includes(instanceForm.agentId) && instanceForm.writable });
     await api.scan({ instanceId: registered.id });
-    await store.refresh(); ElMessage.success('Agent 实例已登记'); drawer.value = null;
+    await store.refresh(true); ElMessage.success('Agent 实例已登记'); drawer.value = null;
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '登记失败'); }
   finally { actionBusy.value = false; }
 }

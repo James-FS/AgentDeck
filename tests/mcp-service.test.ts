@@ -3,7 +3,8 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { mcpServiceEvidence } from '../packages/adapters/src/mcp-service';
 import { codexAdapter, claudeCodeAdapter, zcodeAdapter, deepSeekHarnessAdapter } from '../packages/adapters/src/index';
-import { resourceRows } from '../apps/web/src/resource-tree';
+import { deriveEntities } from '../apps/web/src/resource-entities';
+import { defaultDisplayPolicy } from '../apps/web/src/resource-visibility';
 import { createTestDirectory, removeTestDirectory, fileTreeDigests } from './helpers';
 import type { AgentInstance } from '../packages/contracts/src/index';
 
@@ -70,7 +71,8 @@ describe('scanner MCP service provenance', () => {
       expect(codex.mcpService?.identity).toBe(zcode.mcpService?.identity);
       expect(codex.mcpService?.packageVersion).toBe('2.0.4'); expect(zcode.mcpService?.packageVersion).toBeNull();
       expect(codex.projectId).toBe('project'); expect(zcode.projectId).toBeNull(); expect(zcode.enabled).toBe(false);
-      expect(resourceRows([codex,zcode],()=>true,new Set(),'mcp')[0]?.mcpGroup?.members).toHaveLength(2);
+      const entities = deriveEntities({ bindings: [codex, zcode], findings: [], policy: defaultDisplayPolicy }).entities.filter(e=>e.kind==='mcp');
+      expect(entities).toHaveLength(1); expect(entities[0]!.bindings).toHaveLength(2);
       expect(await fileTreeDigests(directory)).toEqual(before);
       for (const config of [{command:'uvx',args:['blender-mcp==1.9.4']}, {command:'uvx',args:['--from','private-package','blender-mcp']},
         {command:'uvx',args:['blender-mcp'],env:{UV_INDEX_URL:'https://private.invalid'}}]) expect(await mcpServiceEvidence(config,'config')).toBeUndefined();
@@ -102,8 +104,9 @@ describe('scanner MCP service provenance', () => {
         bindings.push(binding);
       }
       expect(new Set(bindings.map(b=>b.id)).size).toBe(4); expect(new Set(bindings.map(b=>b.mcpService?.identity)).size).toBe(1);
-      const rows = resourceRows(bindings,()=>true,new Set(),'mcp');
-      expect(rows).toHaveLength(1); expect(rows[0]?.mcpGroup?.members).toHaveLength(3); // DSH component retains its parent relationship.
+      const mcpEntities = deriveEntities({ bindings, findings: [], policy: defaultDisplayPolicy }).entities.filter(e=>e.kind==='mcp');
+      expect(mcpEntities).toHaveLength(2); // Same service identity folds three entries; the DSH plugin component stays a separate entity.
+      expect(mcpEntities.find(e=>e.bindings.length===3)!.bindings).toHaveLength(3); expect(mcpEntities.find(e=>e.bindings.length===1)).toBeDefined();
       expect(JSON.stringify(bindings)).not.toContain('PRIVATE_MCP_SECRET'); expect(await fileTreeDigests(directory)).toEqual(before);
     } finally { await removeTestDirectory(directory); }
   });

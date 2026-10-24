@@ -4,7 +4,7 @@ import { storeToRefs } from 'pinia';
 import { Box, Connection, Document, InfoFilled } from '@element-plus/icons-vue';
 import { configurationState } from '../../configuration-state';
 import { diskOnly, inventoryAgent, inventoryScope } from '../../classification';
-import { mcpGroupState, publicGroupState } from '../../resource-tree';
+import { mcpGroupState, publicGroupState } from '../../resource-entities';
 import {
   agentName, bindingCategoryLabel, capabilityAreaLabel, capabilityStatusLabel, categoryLabel, classificationLabel, discoveryAgent,
   originLabel, publicDisabledLabel, resourceName, scopeLabel, sourceLabel, stateLabel, timeLabel,
